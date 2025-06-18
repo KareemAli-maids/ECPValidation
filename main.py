@@ -14,6 +14,7 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 import time
+from datetime import datetime
 
 # Import our comparison logic
 from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet
@@ -40,6 +41,41 @@ class ComparisonResponse(BaseModel):
     message: str
     sheet_url: Optional[str] = None
     summary: Optional[Dict[str, Any]] = None
+
+# Global progress tracking
+progress_data = {
+    "current_step": "",
+    "progress_percentage": 0,
+    "logs": [],
+    "status": "idle"  # idle, running, completed, error
+}
+
+def update_progress(step: str, percentage: int, log_message: str = None):
+    """Update global progress state"""
+    global progress_data
+    progress_data["current_step"] = step
+    progress_data["progress_percentage"] = max(0, min(100, percentage))
+    progress_data["status"] = "running"
+    
+    if log_message:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        progress_data["logs"].append({
+            "timestamp": timestamp,
+            "message": log_message,
+            "type": "info"
+        })
+    
+    logger.info(f"Progress: {step} - {percentage}% - {log_message}")
+
+def reset_progress():
+    """Reset progress state"""
+    global progress_data
+    progress_data = {
+        "current_step": "",
+        "progress_percentage": 0,
+        "logs": [],
+        "status": "idle"
+    }
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -76,12 +112,18 @@ async def compare_data(request: ComparisonRequest):
             # Update the DATABASE_URL with new page ID
             merge_compare.DATABASE_URL = f"https://www.notion.so/{page_id}"
         
+        # Reset and initialize progress
+        reset_progress()
+        update_progress("Initializing validation process", 2, "Starting ECP validation...")
+        
         # Fetch data from both sources
         logger.info("Fetching Notion data...")
         notion_records = []
         if request.page_id:
             try:
+                update_progress("Fetching Notion data", 5, "Connecting to Notion database...")
                 notion_records = gather_notion_data()
+                update_progress("Fetching Notion data", 65, f"Retrieved {len(notion_records)} Notion records")
             except Exception as e:
                 logger.warning(f"Notion fetch failed: {e}")
         
@@ -89,7 +131,9 @@ async def compare_data(request: ComparisonRequest):
         erp_records = []
         if request.prompt_name:
             try:
+                update_progress("Fetching ERP data", 70, "Connecting to ERP system...")
                 erp_records = gather_erp_data()
+                update_progress("Fetching ERP data", 80, f"Retrieved {len(erp_records)} ERP records")
             except Exception as e:
                 logger.warning(f"ERP fetch failed: {e}")
         
@@ -107,8 +151,9 @@ async def compare_data(request: ComparisonRequest):
         logger.info(f"Total parameters: Notion={len(notion_lookup)}, ERP={len(erp_lookup)}, Combined={len(all_params)}")
         
         # Prepare data rows for comparison
+        update_progress("AI Analysis with Claude", 82, f"Analyzing {len(all_params)} parameters with Claude...")
         data_rows = []
-        for param in all_params:
+        for i, param in enumerate(all_params):
             notion_json = notion_lookup.get(param, {})
             erp_json = erp_lookup.get(param, {})
             
@@ -129,12 +174,24 @@ async def compare_data(request: ComparisonRequest):
                 json.dumps(erp_json, ensure_ascii=False, indent=2),
                 comparison_text,
             ])
+            
+            # Update progress during analysis
+            if i % 5 == 0:  # Update every 5 parameters
+                progress = 82 + (i / len(all_params)) * 8  # 82-90%
+                update_progress("AI Analysis with Claude", int(progress), f"Analyzed {i+1}/{len(all_params)} parameters")
+        
+        update_progress("Generating comparison report", 90, "Analysis complete, preparing report...")
         
         # Create Google Sheet
         logger.info("Creating Google Sheet...")
+        update_progress("Creating Google Sheet", 95, "Setting up Google Sheets...")
         sheet_url = create_shared_google_sheet(data_rows)
+        update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
         
         elapsed_time = time.time() - start_time
+        
+        # Mark as completed
+        progress_data["status"] = "completed"
         
         return ComparisonResponse(
             success=True,
@@ -159,6 +216,11 @@ async def compare_data(request: ComparisonRequest):
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "timestamp": time.time()}
+
+@app.get("/api/progress")
+async def get_progress():
+    """Get current progress status"""
+    return progress_data
 
 if __name__ == "__main__":
     import uvicorn
