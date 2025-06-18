@@ -616,7 +616,7 @@ class NotionDatabaseToCSV:
                     i = j - 1
                 i += 1
 
-            identifier = f"TECHNICAL_FUNCTION_VALUE: {page_name.replace(' ', '_')}"
+            identifier = f"{page_name.replace(' ', '_')}"
 
             return {
                 "identifier": identifier,
