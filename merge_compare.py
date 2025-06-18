@@ -1,0 +1,831 @@
+#!/usr/bin/env python3
+"""
+merge_compare.py
+~~~~~~~~~~~~~~~~
+Pipeline to:
+1. Fetch GPTPromptParameter configs from ERP (copied from erpfetch.py)
+2. Fetch TECHNICAL_FUNCTION_VALUE configs from Notion (copied from kareemdatabasetest.py)
+3. Compare each parameter using Anthropic Claude with a strict semantic-difference prompt
+   adapted from the original Google Apps Script (Code.gs).
+4. Create a shared Google Sheet with comparison results that anyone in the domain can access:
+      parameter | Notion JSON | ERP JSON | Claude comparison result
+
+Install dependencies first:
+  pip install requests python-dotenv notion-client tqdm gspread google-auth
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+import sys
+import textwrap
+import time
+import concurrent.futures
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import requests
+from dotenv import load_dotenv
+from openpyxl import Workbook
+from tqdm import tqdm
+from notion_client import Client
+from notion_client.errors import APIResponseError, RequestTimeoutError
+import gspread
+from google.oauth2.service_account import Credentials
+
+# Load environment variables
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# CONFIG / ENVIRONMENT VARIABLES
+# ---------------------------------------------------------------------------
+
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+PROMPT_NAME = os.getenv("PROMPT_NAME", "Doctors")  # Default fallback
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+# Validate required environment variables
+required_vars = {
+    "AUTH_TOKEN": AUTH_TOKEN,
+    "NOTION_TOKEN": NOTION_TOKEN,
+    "DATABASE_URL": DATABASE_URL,
+    "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY
+}
+
+missing_vars = [var for var, value in required_vars.items() if not value]
+if missing_vars:
+    print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+    print("Please check your .env file or environment variable configuration.")
+    sys.exit(1)
+
+# Output workbook path
+XLSX_OUT = Path("comparison_results.xlsx")
+
+# Google Sheets Configuration
+def get_google_credentials():
+    """Get Google service account credentials from environment variables."""
+    # Try to get full JSON first
+    google_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if google_json:
+        try:
+            return json.loads(google_json)
+        except json.JSONDecodeError:
+            print("❌ Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON")
+            sys.exit(1)
+    
+    # Fallback to individual environment variables
+    return {
+        "type": "service_account",
+        "project_id": os.getenv("GOOGLE_PROJECT_ID"),
+        "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GOOGLE_PRIVATE_KEY", "").replace('\\n', '\n'),
+        "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_CLIENT_EMAIL', '').replace('@', '%40')}",
+        "universe_domain": "googleapis.com"
+    }
+
+GOOGLE_SHEETS_CREDENTIALS = get_google_credentials()
+
+# Domain for sharing (anyone with this domain can access)
+DOMAIN_TO_SHARE = os.getenv("DOMAIN_TO_SHARE", "maids.cc")
+
+# ERP Configuration
+PAGE_SIZE = 100
+API_ROOT = "https://erpbackendpro.maids.cc/chatai/gptpromptparameter"
+
+# Initialize global notion client variable for the helper functions
+notion = None
+
+# Set up logging for debugging
+log = logging.getLogger(__name__)
+log.setLevel(logging.WARNING)
+
+# Disable verbose HTTP logging from notion client and urllib3
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
+# ---------------------------------------------------------------------------
+# Claude comparison prompt (trimmed from Code.gs – keep exactly same semantics)
+# ---------------------------------------------------------------------------
+
+COMPARISON_PROMPT = (
+    "# JSON Configuration Semantic Comparison Prompt\n\n"
+    "You are an expert JSON analyst specializing in TECHNICAL_FUNCTION_VALUE configuration comparison. "
+    "Your task is to identify ONLY meaningful semantic differences that would cause functional failures while being extremely strict about ignoring equivalent variations.\n\n"
+    "## CRITICAL FOCUS AREAS\n\n"
+    "ANALYZE ONLY:\n"
+    "- Missing conditional branches that change business logic outcomes\n"
+    "- Additional conditional branches that change business logic outcomes\n  "
+    "- Different comparison values that alter system behavior\n"
+    "- Missing conditions that would cause incorrect routing or processing\n\n"
+    "IGNORE:\n"
+    "- Bracket types, escape characters, JSON formatting / ordering\n"
+    "- Prompt names, variable naming, condition order when logically equivalent\n\n"
+    "RULES:\n"
+    "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
+    "2. Otherwise, list each issue as a bullet starting with * .\n\n"
+    "## COMPARISON TASK\n"
+    "Compare these two JSON configurations and identify ONLY semantic differences that affect functionality:\n\n"
+    "NOTION JSON (Reference):\n```json\n{{NOTION_JSON}}\n```\n\n"
+    "ERP JSON (Target):\n```json\n{{ERP_JSON}}\n```\n"
+)
+
+# ---------------------------------------------------------------------------
+# Helper – call Anthropic Claude
+# ---------------------------------------------------------------------------
+
+def compare_with_claude(notion_json: Dict[str, Any] | List[Any], erp_json: Dict[str, Any] | List[Any]) -> str:
+    """Return Claude comparison output (stripped)."""
+
+    prompt = (
+        COMPARISON_PROMPT.replace("{{NOTION_JSON}}", json.dumps(notion_json, ensure_ascii=False, indent=2))
+        .replace("{{ERP_JSON}}", json.dumps(erp_json, ensure_ascii=False, indent=2))
+    )
+
+    payload = {
+        "model": "claude-3-sonnet-20240229",
+        "max_tokens": 1024,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "content-type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            logging.warning("Claude API error %s: %s", resp.status_code, resp.text[:200])
+            return f"API Error {resp.status_code}: {resp.text[:100]}"
+        data = resp.json()
+        # Claude v1 format: top-level 'content' list with dicts containing 'text'
+        if isinstance(data, dict):
+            content = data.get("content")
+            if isinstance(content, list) and content and isinstance(content[0], dict):
+                return content[0].get("text", "").strip()
+        return "[Unexpected Claude response]"
+    except Exception as e:
+        logging.error("Claude comparison failed: %s", e)
+        return f"Error calling Claude: {e}"
+
+# ---------------------------------------------------------------------------
+# ERP FETCH HELPERS (copied from erpfetch.py)
+# ---------------------------------------------------------------------------
+
+BASE_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "accept-language": "en-US,en;q=0.8",
+    "authorization": f"Bearer {AUTH_TOKEN}",
+    "cookie": (
+        "deviceIdProduction=1741032443123; "
+        "mfaCodeProduction=399936; "
+        "isERPAuth=KareemAli; "
+        "user=%7B%22loginName%22%3A%22KareemAli%22%7D; "
+        f"authTokenProduction={AUTH_TOKEN}"
+    ),
+    "origin": "https://erp.maids.cc",
+    "referer": "https://erp.maids.cc/",
+    "priority": "u=1, i",
+    "sec-ch-ua": '"Chromium";v="137", "Brave";v="137", "Not.A/Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "sec-gpc": "1",
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    ),
+    "cache-control": "no-cache, no-store, max-age=0, must-revalidate",
+    "pragma": "no-cache",
+}
+
+def get_search_filter_header_value(prompt_name: str) -> str:
+    """Generate search filter header value for dynamic prompt name filtering with creation date."""
+    return json.dumps({
+        "and": True,
+        "left": {
+            "field": "G.creationDate",
+            "operation": ">",
+            "value": "2025-05-01 12:17:57",
+            "fieldType": "timestamp",
+            "required": False
+        },
+        "right": {
+            "field": "P.name",
+            "operation": "Contains",
+            "value": prompt_name,
+            "fieldType": "string",
+            "required": False
+        }
+    })
+
+
+PAGE_HEADERS = {
+    **BASE_HEADERS,
+    "pagecode": "chatai__input_parameters_for_prompts",
+    "searchfilter": get_search_filter_header_value(PROMPT_NAME),
+}
+
+DETAIL_HEADERS = {
+    **BASE_HEADERS,
+    "pagecode": "chatai__input_parameters_for_prompts_add_edit",
+}
+
+# Expression helpers
+FIELD_RENAMES = {"maidType": "Client_Type"}
+
+def _normalise_op(op: str) -> str:
+    op = op.upper()
+    return {"=": "==", "IS NULL": "IS NULL", "IS NOT NULL": "IS NOT NULL"}.get(op, op)
+
+def _expr_to_string(node: Dict[str, Any]) -> str:
+    if node.get("leaf", False) or not ("left" in node and "right" in node):
+        field = node.get("fieldName", "")
+        if field and field.startswith("$context."):
+            field = field[len("$context."):]
+        field = FIELD_RENAMES.get(field, field)
+        op = _normalise_op(node.get("operation", ""))
+        val = node.get("value")
+        return f"{field} {op}" if op.startswith("IS") else f"{field} {op} {val}"
+    left = _expr_to_string(node["left"])
+    right = _expr_to_string(node["right"])
+    logic = node.get("logicalOperator", "").upper()
+    return f"( {left} {logic} {right} )"
+
+def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform a GPTPromptParameter record into the simplified schema."""
+    identifier = raw.get("name", "")
+    parameter = raw.get("name", "")
+
+    logic: List[Dict[str, str]] = []
+    conditions = []
+    
+    evaluation_type = raw.get("evaluationType", "")
+    if evaluation_type == "ERP_CONDITION":
+        conditions = raw.get("gptPromptParamConditions", [])
+    elif evaluation_type == "API":
+        api_data = raw.get("gptPromptParamApi", {})
+        conditions = api_data.get("gptConditions", [])
+    
+    conditions.sort(key=lambda c: c.get("priority", 0))
+    
+    for cond in conditions:
+        expr_tree = cond.get("expression") or json.loads(cond.get("tree", "{}"))
+        logic.append({
+            "condition": _expr_to_string(expr_tree),
+            "value": cond.get("value", "").strip(),
+        })
+    
+    default_value = raw.get("defaultValue", "")
+    if default_value and default_value.strip():
+        logic.append({
+            "condition": "else",
+            "value": default_value.strip()
+        })
+
+    return {
+        "identifier": identifier,
+        "parameter": parameter,
+        "conditionalLogic": logic,
+    }
+
+def fetch_ids() -> List[int]:
+    """Fetch all GPTPromptParameter IDs, filtering out CONTEXT evaluation types."""
+    ids: List[int] = []
+    page = 0
+    
+    while True:
+        params = {"page": page, "size": PAGE_SIZE, "sort": "creationDate,DESC", "search": ""}
+        headers = {
+            **PAGE_HEADERS,
+            "searchfilter": get_search_filter_header_value(PROMPT_NAME)
+        }
+        
+        try:
+            resp = requests.get(f"{API_ROOT}/page/", headers=headers, params=params, timeout=30)
+            logging.info("/page/ %s → %s", page, resp.status_code)
+            
+            if resp.status_code in (401, 403):
+                raise ValueError("ERP Auth token expired. Please update your .env file.")
+            
+            resp.raise_for_status()
+            chunk = resp.json().get("content", [])
+            
+            if not chunk:
+                break
+            
+            filtered_chunk = [item for item in chunk if item.get("evaluationType") != "CONTEXT"]
+            logging.info("Page %s: %s total records, %s after filtering out CONTEXT types", 
+                        page, len(chunk), len(filtered_chunk))
+            
+            ids.extend(item["id"] for item in filtered_chunk)
+            
+            if len(chunk) < PAGE_SIZE:
+                break
+            page += 1
+            
+        except Exception as err:
+            logging.error("Error fetching page %s: %s", page, err)
+            if "ERP Auth token expired" in str(err):
+                raise
+            break
+    
+    logging.info("Discovered %d IDs", len(ids))
+    return ids
+
+def fetch_one(ident: int) -> Dict[str, Any]:
+    """Fetch a single GPTPromptParameter record by ID."""
+    resp = requests.get(f"{API_ROOT}/{ident}", headers=DETAIL_HEADERS, timeout=30)
+    logging.info("GET %s → %s", ident, resp.status_code)
+    
+    if resp.status_code in (401, 403):
+        raise ValueError("ERP Auth token expired. Please update your .env file.")
+    
+    if resp.status_code != 200:
+        preview = textwrap.shorten(resp.text, width=120, placeholder=" …")
+        logging.warning("Non‑200 body preview: %s", preview)
+    
+    resp.raise_for_status()
+    return resp.json()
+
+# ---------------------------------------------------------------------------
+# NOTION HELPERS (copied from kareemdatabasetest.py)
+# ---------------------------------------------------------------------------
+
+def _fetch_all_children(block_id: str) -> List[dict]:
+    """Return every child block, or [] if the API refuses (400/404/403)."""
+    log.debug("Fetching children for block: %s", block_id[:8] + "...")
+    children, cursor = [], None
+    page_count = 0
+    
+    while True:
+        try:
+            page_count += 1
+            log.debug("Fetching page %d of children for block %s...", page_count, block_id[:8] + "...")
+            resp = notion.blocks.children.list(
+                block_id, start_cursor=cursor, page_size=100
+            )
+        except RequestTimeoutError:
+            if page_count < 3:
+                log.warning("Request timeout when fetching children for block %s – retrying (%d/3)", block_id[:8] + "...", page_count)
+                time.sleep(2 ** page_count)
+                continue
+            else:
+                log.error("Repeated timeouts when fetching children for block %s – giving up", block_id[:8] + "...")
+                break
+        except APIResponseError as e:
+            log.warning(
+                "Skipping inaccessible block's children: %s  (status %s, code %s)",
+                block_id,
+                getattr(e, "status", "??"),
+                getattr(e, "code", "??"),
+            )
+            break
+
+        children.extend(resp["results"])
+        log.debug("Added %d children from page %d (total: %d)", len(resp["results"]), page_count, len(children))
+        
+        if resp.get("has_more"):
+            cursor = resp["next_cursor"]
+            log.debug("More children available, continuing with cursor: %s...", cursor[:8] if cursor else "None")
+        else:
+            break
+    
+    log.info("Retrieved %d total children for block %s", len(children), block_id[:8] + "...")
+    return children
+
+def _plain_text(block: dict) -> str:
+    """Concatenate rich-text → plain string."""
+    block_type = block.get("type", "")
+    if block_type not in block:
+        return ""
+    
+    rt = block[block_type].get("rich_text", [])
+    return "".join(piece.get("text", {}).get("content", "") for piece in rt)
+
+def _extract_block_metadata(block: dict) -> Dict[str, Any]:
+    """Extract comprehensive metadata from a block."""
+    metadata = {
+        "id": block.get("id", ""),
+        "type": block.get("type", ""),
+        "created_time": block.get("created_time", ""),
+        "last_edited_time": block.get("last_edited_time", ""),
+        "has_children": block.get("has_children", False),
+        "archived": block.get("archived", False),
+    }
+    
+    if "parent" in block:
+        metadata["parent_type"] = block["parent"].get("type", "")
+        metadata["parent_id"] = block["parent"].get("page_id") or block["parent"].get("block_id", "")
+    
+    return metadata
+
+def _extract_block_content(block: dict, notion_client=None) -> Dict[str, Any]:
+    """Extract content based on block type."""
+    block_id = block.get("id", "unknown")[:8] + "..."
+    block_type = block.get("type", "")
+    log.debug("Extracting content from %s block: %s", block_type, block_id)
+    
+    content = {"text": _plain_text(block)}
+    
+    if block_type not in block:
+        log.warning("Block type '%s' not found in block data for %s", block_type, block_id)
+        return content
+    
+    block_data = block[block_type]
+    
+    if block_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"]:
+        content["rich_text"] = json.dumps(block_data.get("rich_text", []))
+    elif block_type == "toggle":
+        content["rich_text"] = json.dumps(block_data.get("rich_text", []))
+    else:
+        if "rich_text" in block_data:
+            content["rich_text"] = json.dumps(block_data.get("rich_text", []))
+    
+    return content
+
+class NotionDatabaseToCSV:
+    def __init__(self, api_key: str):
+        """Initialize the Notion client with API key"""
+        global notion
+        self.notion = Client(auth=api_key)
+        notion = self.notion
+    
+    def extract_database_id_from_url(self, database_url: str) -> str:
+        """Extract database ID from Notion database URL"""
+        if "notion.so" in database_url:
+            parts = database_url.split('/')
+            for part in reversed(parts):
+                if part and len(part) >= 32:
+                    db_id = part.split('?')[0]
+                    return db_id.replace('-', '')
+        
+        if len(database_url) == 32:
+            return database_url
+        
+        raise ValueError("Invalid Notion database URL format")
+
+    def extract_all_blocks_using_working_algorithm(self, page_id: str) -> List[Dict[str, Any]]:
+        """Extract all blocks using the EXACT working algorithm from test_all_blocks_extractor"""
+        all_blocks = []
+        block_count = 0
+        
+        def dfs(bid: str, depth: int = 0) -> None:
+            nonlocal block_count
+            
+            children = _fetch_all_children(bid)
+            
+            for i, child in enumerate(children):
+                child_id = child.get("id", "unknown")[:8] + "..."
+                child_type = child.get("type", "unknown")
+                
+                metadata = _extract_block_metadata(child)
+                content = _extract_block_content(child, self.notion)
+                
+                block_record = {
+                    **metadata,
+                    **content,
+                    "depth": depth,
+                    "full_block_json": "" if not log.isEnabledFor(logging.DEBUG) else json.dumps(child, indent=2, ensure_ascii=False)
+                }
+                
+                all_blocks.append(block_record)
+                block_count += 1
+                
+                if child.get("has_children"):
+                    dfs(child["id"], depth + 1)
+        
+        dfs(page_id)
+        return all_blocks
+
+    def _find_technical_ecp_block(self, start_block_id: str) -> Optional[dict]:
+        """Depth-first search for the first block whose plain text starts with 'Technical ECP'."""
+
+        def dfs(bid: str) -> Optional[dict]:
+            children = _fetch_all_children(bid)
+            for child in children:
+                text = _plain_text(child).strip()
+                if text.lower().startswith("technical ecp"):
+                    return child
+                if child.get("has_children"):
+                    found = dfs(child["id"])
+                    if found:
+                        return found
+            return None
+
+        return dfs(start_block_id)
+
+    def extract_technical_ecp_only(self, page_id: str) -> List[Dict[str, Any]]:
+        """Locate the 'Technical ECP' block and return that block and all of its descendants."""
+
+        target_block = self._find_technical_ecp_block(page_id)
+        if not target_block:
+            return []
+
+        result: List[Dict[str, Any]] = []
+
+        metadata = _extract_block_metadata(target_block)
+        content = _extract_block_content(target_block, self.notion)
+        result.append({
+            **metadata,
+            **content,
+            "depth": 0,
+            "full_block_json": "" if not log.isEnabledFor(logging.DEBUG) else json.dumps(target_block, indent=2, ensure_ascii=False)
+        })
+
+        descendant_blocks = self.extract_all_blocks_using_working_algorithm(target_block["id"])
+        for blk in descendant_blocks:
+            blk["depth"] += 1
+            if not log.isEnabledFor(logging.DEBUG):
+                blk["full_block_json"] = ""
+        result.extend(descendant_blocks)
+
+        return result
+
+    def _process_page(self, page_index: int, total_pages: int, page: dict) -> Optional[Dict[str, Any]]:
+        """Process a single Notion page and return structured data."""
+
+        try:
+            page_name = "Untitled"
+            for prop_name, prop_data in page["properties"].items():
+                if prop_data.get("type") == "title":
+                    title_data = prop_data.get('title', [])
+                    clean_value = ' '.join([text.get('plain_text', '') for text in title_data if text])
+                    if clean_value:
+                        page_name = clean_value
+                        break
+
+            filtered_blocks = self.extract_technical_ecp_only(page["id"])
+
+            if not filtered_blocks:
+                return None
+
+            parameter_name = ""
+            conditional_logic = []
+
+            i = 0
+            n_blocks = len(filtered_blocks)
+            while i < n_blocks:
+                blk = filtered_blocks[i]
+                text = blk.get("text", "").strip()
+                btype = blk.get("type")
+
+                if btype == "toggle" and text.lower().startswith("technical ecp parameter name"):
+                    parts = text.split(":", 1)
+                    if len(parts) == 2:
+                        parameter_name = parts[1].strip()
+
+                elif btype == "toggle" and "condition" in text.lower():
+                    condition_depth = blk.get("depth", 0)
+                    condition_text = text.replace("[toggle]", "").strip()
+                    if condition_text.lower().startswith("condition "):
+                        condition_text = condition_text[10:].strip()
+                    j = i + 1
+                    values = []
+                    while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
+                        inner_blk = filtered_blocks[j]
+                        if inner_blk.get("type") == "bulleted_list_item":
+                            values.append(inner_blk.get("text", "").strip())
+                        j += 1
+                    value_text = " ".join(values)
+                    conditional_logic.append({
+                        "condition": condition_text,
+                        "value": value_text
+                    })
+                    i = j - 1
+                i += 1
+
+            identifier = f"TECHNICAL_FUNCTION_VALUE: {page_name.replace(' ', '_')}"
+
+            return {
+                "identifier": identifier,
+                "parameter": parameter_name,
+                "conditionalLogic": conditional_logic
+            }
+
+        except Exception as e:
+            log.error("Error processing page %s: %s", page.get("id", "unknown"), e)
+            return None
+
+# ---------------------------------------------------------------------------
+# Fetch ERP data
+# ---------------------------------------------------------------------------
+
+def gather_erp_data() -> List[Dict[str, Any]]:
+    logging.info("Fetching ERP data for prompt '%s'", PROMPT_NAME)
+    ids = fetch_ids()
+    records: List[Dict[str, Any]] = []
+    for ident in tqdm(ids, desc="ERP records"):
+        raw = fetch_one(ident)
+        converted = convert_record(raw)
+        records.append(converted)
+    return records
+
+# ---------------------------------------------------------------------------
+# Fetch Notion data
+# ---------------------------------------------------------------------------
+
+def gather_notion_data() -> List[Dict[str, Any]]:
+    logging.info("Fetching Notion data from database %s", DATABASE_URL)
+    processor = NotionDatabaseToCSV(NOTION_TOKEN)
+
+    database_id = processor.extract_database_id_from_url(DATABASE_URL)
+    database_info = processor.notion.databases.retrieve(database_id)
+
+    tech_valid_prop = None
+    for prop_name in database_info.get("properties", {}):
+        if prop_name.lower().strip() == "technical validated":
+            tech_valid_prop = prop_name
+            break
+
+    filter_payload: Dict[str, Any] | None = None
+    if tech_valid_prop:
+        prop_info = database_info["properties"][tech_valid_prop]
+        prop_type = prop_info.get("type")
+        if prop_type == "checkbox":
+            filter_payload = {"property": tech_valid_prop, "checkbox": {"equals": True}}
+        elif prop_type in {"status", "select"}:
+            truthy_labels = {"true", "yes", "validated", "done", "complete"}
+            chosen = "True"
+            for opt in prop_info.get(prop_type, {}).get("options", []):
+                if opt.get("name", "").lower() in truthy_labels:
+                    chosen = opt["name"]
+                    break
+            filter_payload = {"property": tech_valid_prop, prop_type: {"equals": chosen}}
+
+    pages: List[Dict[str, Any]] = []
+    has_more = True
+    cursor = None
+    while has_more:
+        query_kwargs: Dict[str, Any] = {"database_id": database_id, "page_size": 100}
+        if filter_payload:
+            query_kwargs["filter"] = filter_payload
+        if cursor:
+            query_kwargs["start_cursor"] = cursor
+        resp = processor.notion.databases.query(**query_kwargs)
+        pages.extend(resp["results"])
+        has_more = resp.get("has_more", False)
+        cursor = resp.get("next_cursor")
+
+    records: List[Dict[str, Any]] = []
+    for idx, page in enumerate(tqdm(pages, desc="Notion pages")):
+        obj = processor._process_page(idx + 1, len(pages), page)
+        if obj:
+            records.append(obj)
+    return records
+
+# ---------------------------------------------------------------------------
+# Google Sheets Helper
+# ---------------------------------------------------------------------------
+
+def create_shared_google_sheet(data_rows: List[List[str]]) -> str:
+    """Create a Google Sheet with comparison data and share it with anyone who has the link."""
+    try:
+        # Set up credentials and authorize
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        print("Setting up Google Sheets client...")
+        creds = Credentials.from_service_account_info(GOOGLE_SHEETS_CREDENTIALS, scopes=scopes)
+        gc = gspread.authorize(creds)
+        
+        # Create new spreadsheet
+        sheet_title = f"ERP-Notion Comparison {time.strftime('%Y-%m-%d %H:%M')}"
+        print(f"Creating spreadsheet: {sheet_title}")
+        
+        try:
+            spreadsheet = gc.create(sheet_title)
+            print(f"✅ Spreadsheet created with ID: {spreadsheet.id}")
+        except Exception as create_error:
+            print(f"❌ Failed to create spreadsheet:")
+            print(f"Create error: {type(create_error).__name__}: {str(create_error)}")
+            raise create_error
+            
+        worksheet = spreadsheet.sheet1
+        
+        # Add header and data
+        print("Adding header row...")
+        worksheet.update('A1:D1', [['Parameter', 'Notion JSON', 'ERP JSON', 'Claude Comparison']])
+        
+        # Add data in batches (Google Sheets API has limits)
+        print(f"Adding {len(data_rows)} data rows...")
+        batch_size = 100
+        for i in range(0, len(data_rows), batch_size):
+            batch = data_rows[i:i + batch_size]
+            start_row = i + 2  # +2 because we start after header row
+            end_row = start_row + len(batch) - 1
+            range_name = f'A{start_row}:D{end_row}'
+            worksheet.update(range_name, batch)
+            logging.info(f"Updated rows {start_row}-{end_row}")
+        
+        # Format the sheet
+        print("Formatting header...")
+        worksheet.format('A1:D1', {
+            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}}
+        })
+        
+        # Auto-resize columns
+        print("Auto-resizing columns...")
+        worksheet.columns_auto_resize(0, 3)  # Columns A-D
+        
+        # Share with anyone who has the link (instead of domain restriction)
+        print("Attempting to share with anyone who has the link...")
+        try:
+            # Share with anyone who has the link (no domain restriction)
+            spreadsheet.share('', perm_type='anyone', role='reader', with_link=True)
+            print("✅ Successfully shared with anyone who has the link")
+        except Exception as share_error:
+            print(f"⚠️  Public sharing failed: {type(share_error).__name__}: {str(share_error)}")
+            print("Sheet created but not publicly shared")
+        
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+        print(f"✅ Google Sheet created: {sheet_url}")
+        print(f"📋 Share this URL with your organization: {sheet_url}")
+        return sheet_url
+        
+    except Exception as e:
+        logging.error(f"Failed to create Google Sheet: {e}")
+        # Fallback to local Excel file
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Comparison"
+        ws.append(["Parameter", "Notion JSON", "ERP JSON", "Claude Comparison"])
+        for row in data_rows:
+            ws.append(row)
+        wb.save(XLSX_OUT)
+        logging.info(f"Fallback: Local Excel file saved to {XLSX_OUT}")
+        return str(XLSX_OUT.resolve())
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+
+    # Fetch from both sources
+    notion_records = gather_notion_data()
+    erp_records = gather_erp_data()
+
+    # Build lookup by parameter name (case-insensitive)
+    notion_lookup = {rec["parameter"].lower(): rec for rec in notion_records if rec.get("parameter")}
+    erp_lookup = {rec["parameter"].lower(): rec for rec in erp_records if rec.get("parameter")}
+
+    all_params = sorted(set(notion_lookup) | set(erp_lookup))
+    logging.info("Total parameters: Notion=%d, ERP=%d, Combined=%d", len(notion_lookup), len(erp_lookup), len(all_params))
+
+    # Prepare data rows for Google Sheets
+    data_rows = []
+
+    for param in tqdm(all_params, desc="Comparing"):
+        notion_json = notion_lookup.get(param, {})
+        erp_json = erp_lookup.get(param, {})
+        # Use Claude for comparison only if both sides exist
+        if notion_json and erp_json:
+            comparison_text = compare_with_claude(notion_json, erp_json)
+        elif notion_json and not erp_json:
+            comparison_text = "Parameter missing in ERP"
+        elif erp_json and not notion_json:
+            comparison_text = "Parameter missing in Notion"
+        else:
+            comparison_text = "No data"
+
+        data_rows.append([
+            param,
+            json.dumps(notion_json, ensure_ascii=False, indent=2),
+            json.dumps(erp_json, ensure_ascii=False, indent=2),
+            comparison_text,
+        ])
+
+    # Create shared Google Sheet
+    sheet_url = create_shared_google_sheet(data_rows)
+    logging.info("🎉 Comparison complete! Sheet URL: %s", sheet_url)
+
+
+if __name__ == "__main__":
+    main() 
