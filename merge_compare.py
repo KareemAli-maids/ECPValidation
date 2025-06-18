@@ -105,6 +105,20 @@ API_ROOT = "https://erpbackendpro.maids.cc/chatai/gptpromptparameter"
 # Initialize global notion client variable for the helper functions
 notion = None
 
+# Global progress callback - can be set by main.py
+progress_callback = None
+cancel_event = None
+
+def set_progress_callback(callback):
+    """Set the progress callback function to be called during data gathering."""
+    global progress_callback
+    progress_callback = callback
+
+def set_cancel_event(event):
+    """Register a threading.Event that signals cancellation."""
+    global cancel_event
+    cancel_event = event
+
 # Set up logging for debugging
 log = logging.getLogger(__name__)
 log.setLevel(logging.WARNING)
@@ -616,7 +630,7 @@ class NotionDatabaseToCSV:
                     i = j - 1
                 i += 1
 
-            identifier = f"{page_name.replace(' ', '_')}"
+            identifier = f"TECHNICAL_FUNCTION_VALUE: {page_name.replace(' ', '_')}"
 
             return {
                 "identifier": identifier,
@@ -633,13 +647,51 @@ class NotionDatabaseToCSV:
 # ---------------------------------------------------------------------------
 
 def gather_erp_data() -> List[Dict[str, Any]]:
-    logging.info("Fetching ERP data for prompt '%s'", PROMPT_NAME)
+    """Fetch all ERP GPTPromptParameter records concurrently using a thread pool.
+
+    This significantly speeds up the slow sequential network calls by
+    parallelising the `fetch_one` requests.  The number of worker threads is
+    automatically chosen based on the number of IDs (capped at 32) to avoid
+    overwhelming the ERP backend.
+    """
+    logging.info("Fetching ERP data for prompt '%s' (multithreaded)", PROMPT_NAME)
+
     ids = fetch_ids()
+    if not ids:
+        logging.warning("No ERP IDs found – returning empty list")
+        return []
+
+    # Thread-pool size heuristic: at most 32, but not more than len(ids)
+    max_workers = min(5, len(ids))
+
     records: List[Dict[str, Any]] = []
-    for ident in tqdm(ids, desc="ERP records"):
-        raw = fetch_one(ident)
-        converted = convert_record(raw)
-        records.append(converted)
+    completed_count = 0
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all fetch tasks first
+        futures = {executor.submit(fetch_one, ident): ident for ident in ids}
+
+        # As each future completes, convert and append
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(ids), desc="ERP records"):
+            ident = futures[future]
+            try:
+                raw = future.result()
+                converted = convert_record(raw)
+                records.append(converted)
+                completed_count += 1
+                
+                # Update global progress if callback is available (70-80% range for ERP)
+                if progress_callback and len(ids) > 0:
+                    progress_pct = 70 + int((completed_count / len(ids)) * 10)  # 70-80%
+                    progress_callback("Fetching ERP data", progress_pct, f"Retrieved {completed_count}/{len(ids)} ERP records")
+                    
+                # Stop early if cancellation requested
+                if cancel_event and cancel_event.is_set():
+                    break
+            except Exception as e:
+                logging.error("Failed to fetch ERP ID %s: %s", ident, e)
+
+    logging.info("Fetched %d ERP records", len(records))
     return records
 
 # ---------------------------------------------------------------------------
@@ -688,11 +740,40 @@ def gather_notion_data() -> List[Dict[str, Any]]:
         has_more = resp.get("has_more", False)
         cursor = resp.get("next_cursor")
 
+    # Process pages concurrently using thread pool
     records: List[Dict[str, Any]] = []
-    for idx, page in enumerate(tqdm(pages, desc="Notion pages")):
-        obj = processor._process_page(idx + 1, len(pages), page)
-        if obj:
-            records.append(obj)
+    max_workers = min(4, len(pages))  # Cap at 16 to avoid overwhelming Notion API
+    completed_count = 0
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all page processing tasks
+        futures = {
+            executor.submit(processor._process_page, idx + 1, len(pages), page): (idx, page)
+            for idx, page in enumerate(pages)
+        }
+        
+        # Collect results as they complete
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(pages), desc="Notion pages"):
+            idx, page = futures[future]
+            try:
+                obj = future.result()
+                if obj:
+                    records.append(obj)
+                completed_count += 1
+                
+                # Update global progress if callback is available (5-65% range for Notion, 60% of total)
+                if progress_callback and len(pages) > 0:
+                    progress_pct = 5 + int((completed_count / len(pages)) * 60)  # 5-65%
+                    progress_callback("Fetching Notion data", progress_pct, f"Processed {completed_count}/{len(pages)} Notion pages")
+                    
+                # Early exit on cancellation
+                if cancel_event and cancel_event.is_set():
+                    break
+            except Exception as e:
+                page_id = page.get("id", "unknown")
+                logging.error("Failed to process Notion page %s (index %d): %s", page_id, idx, e)
+    
+    logging.info("Processed %d Notion pages, extracted %d records", len(pages), len(records))
     return records
 
 # ---------------------------------------------------------------------------
@@ -744,13 +825,43 @@ def create_shared_google_sheet(data_rows: List[List[str]]) -> str:
         # Format the sheet
         print("Formatting header...")
         worksheet.format('A1:D1', {
-            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
-            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}}
+            'backgroundColor': {'red': 0.94, 'green': 0.94, 'blue': 0.94},  # #f0f0f0
+            'textFormat': {'bold': True}
         })
         
-        # Auto-resize columns
-        print("Auto-resizing columns...")
-        worksheet.columns_auto_resize(0, 3)  # Columns A-D
+        # ────────────────────────────────────────────────────────────────
+        # COLUMN WIDTH / ALIGNMENT / WRAP  (match historical Code.gs style)
+        # ────────────────────────────────────────────────────────────────
+        print("Applying custom column widths & wrapping…")
+
+        # Column pixel sizes – A:200px, B-D:500px (0-based indices)
+        sheet_id = worksheet._properties["sheetId"]
+        width_requests = []
+        for idx, px in enumerate([200, 500, 500, 500]):
+            width_requests.append({
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": idx,
+                        "endIndex": idx + 1,
+                    },
+                    "properties": {"pixelSize": px},
+                    "fields": "pixelSize",
+                }
+            })
+
+        # Apply batch update for column widths
+        if width_requests:
+            worksheet.spreadsheet.batch_update({"requests": width_requests})
+
+        # Vertical align top & wrap text for entire data range
+        end_row = len(data_rows) + 1  # +1 for header
+        data_range = f"A1:D{end_row}"
+        worksheet.format(data_range, {
+            "verticalAlignment": "TOP",
+            "wrapStrategy": "WRAP"
+        })
         
         # Share with anyone who has the link (instead of domain restriction)
         print("Attempting to share with anyone who has the link...")

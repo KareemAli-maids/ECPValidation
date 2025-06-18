@@ -15,6 +15,7 @@ import logging
 from typing import Optional, Dict, Any
 import time
 from datetime import datetime
+import threading
 
 # Import our comparison logic
 from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet
@@ -47,8 +48,11 @@ progress_data = {
     "current_step": "",
     "progress_percentage": 0,
     "logs": [],
-    "status": "idle"  # idle, running, completed, error
+    "status": "idle"  # idle, running, completed, error, cancelled
 }
+
+# Global cancellation flag – set by /api/stop or browser unload
+cancel_event = threading.Event()
 
 def update_progress(step: str, percentage: int, log_message: str = None):
     """Update global progress state"""
@@ -76,6 +80,7 @@ def reset_progress():
         "logs": [],
         "status": "idle"
     }
+    cancel_event.clear()
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -84,133 +89,186 @@ async def home(request: Request):
 
 @app.post("/api/compare", response_model=ComparisonResponse)
 async def compare_data(request: ComparisonRequest):
-    """Run the ERP-Notion comparison process."""
-    
-    # Validate input
+    """Run the ERP-Notion comparison process *without* blocking the event loop.
+
+    The heavy synchronous work is executed in a background thread via
+    ``asyncio.to_thread`` so that the main asyncio event-loop remains free to
+    serve the ``/api/progress`` polling requests coming from the browser.  This
+    guarantees that the UI can receive real-time updates while the comparison
+    is still running.
+    """
+
+    # ---------------------------------------------------------------
+    # 1. Validate request payload early – run on event-loop thread
+    # ---------------------------------------------------------------
     if not request.page_id and not request.prompt_name:
         raise HTTPException(
-            status_code=400, 
-            detail="At least one data source must be provided (page_id or prompt_name)"
+            status_code=400,
+            detail="At least one data source must be provided (page_id or prompt_name)",
         )
-    
-    try:
-        logger.info("Starting comparison process...")
+
+    # ---------------------------------------------------------------
+    # 2. Define the **blocking** worker function
+    # ---------------------------------------------------------------
+    def _perform_comparison(page_id: str | None, prompt_name: str | None) -> ComparisonResponse:
+        """Synchronous worker executed in a thread."""
+
+        logger.info("Starting comparison process…")
         start_time = time.time()
-        
-        # Update global variables if provided
-        if request.prompt_name:
-            import merge_compare
-            merge_compare.PROMPT_NAME = request.prompt_name
-        
-        if request.page_id:
-            import merge_compare
-            # Extract page ID from full URL if needed
-            if "notion.so" in request.page_id:
-                page_id = request.page_id.split('/')[-1].split('?')[0]
-            else:
-                page_id = request.page_id
-            # Update the DATABASE_URL with new page ID
-            merge_compare.DATABASE_URL = f"https://www.notion.so/{page_id}"
-        
-        # Reset and initialize progress
+
+        # Dynamically update merge_compare globals (safe inside the worker thread)
+        import merge_compare as mc
+        if prompt_name:
+            mc.PROMPT_NAME = prompt_name
+        if page_id:
+            # Extract raw ID if a full Notion URL is provided
+            nid = (
+                page_id.split("/")[-1].split("?")[0] if "notion.so" in page_id else page_id
+            )
+            mc.DATABASE_URL = f"https://www.notion.so/{nid}"
+
+        # Reset + initialise progress
         reset_progress()
-        update_progress("Initializing validation process", 2, "Starting ECP validation...")
-        
-        # Fetch data from both sources
-        logger.info("Fetching Notion data...")
-        notion_records = []
-        if request.page_id:
+        update_progress("Initializing validation process", 2, "Starting ECP validation…")
+        # Clear any previous cancel signal
+        cancel_event.clear()
+
+        # Register callback so helper functions can push granular updates
+        mc.set_progress_callback(update_progress)
+        mc.set_cancel_event(cancel_event)
+
+        # -------------------------------------------------------
+        # 2.a Fetch Notion data
+        # -------------------------------------------------------
+        notion_records: list[dict] = []
+        if page_id:
             try:
-                update_progress("Fetching Notion data", 5, "Connecting to Notion database...")
+                update_progress("Fetching Notion data", 5, "Connecting to Notion database…")
                 notion_records = gather_notion_data()
-                update_progress("Fetching Notion data", 65, f"Retrieved {len(notion_records)} Notion records")
-            except Exception as e:
-                logger.warning(f"Notion fetch failed: {e}")
-        
-        logger.info("Fetching ERP data...")
-        erp_records = []
-        if request.prompt_name:
+                update_progress(
+                    "Fetching Notion data",
+                    65,
+                    f"Retrieved {len(notion_records)} Notion records",
+                )
+            except Exception as exc:
+                logger.warning("Notion fetch failed: %s", exc)
+
+        # -------------------------------------------------------
+        # 2.b Fetch ERP data
+        # -------------------------------------------------------
+        erp_records: list[dict] = []
+        if prompt_name:
             try:
-                update_progress("Fetching ERP data", 70, "Connecting to ERP system...")
+                update_progress("Fetching ERP data", 70, "Connecting to ERP system…")
                 erp_records = gather_erp_data()
-                update_progress("Fetching ERP data", 80, f"Retrieved {len(erp_records)} ERP records")
-            except Exception as e:
-                logger.warning(f"ERP fetch failed: {e}")
-        
+                update_progress(
+                    "Fetching ERP data",
+                    80,
+                    f"Retrieved {len(erp_records)} ERP records",
+                )
+            except Exception as exc:
+                logger.warning("ERP fetch failed: %s", exc)
+
         if not notion_records and not erp_records:
             return ComparisonResponse(
                 success=False,
-                message="No data found from either source. Please check your inputs and try again."
+                message="No data found from either source. Please check your inputs and try again.",
             )
-        
-        # Build lookup dictionaries
-        notion_lookup = {rec["parameter"].lower(): rec for rec in notion_records if rec.get("parameter")}
-        erp_lookup = {rec["parameter"].lower(): rec for rec in erp_records if rec.get("parameter")}
-        
+
+        # -------------------------------------------------------
+        # 2.c Run Claude analysis & build comparison rows
+        # -------------------------------------------------------
+        notion_lookup = {r["parameter"].lower(): r for r in notion_records if r.get("parameter")}
+        erp_lookup = {r["parameter"].lower(): r for r in erp_records if r.get("parameter")}
         all_params = sorted(set(notion_lookup) | set(erp_lookup))
-        logger.info(f"Total parameters: Notion={len(notion_lookup)}, ERP={len(erp_lookup)}, Combined={len(all_params)}")
-        
-        # Prepare data rows for comparison
-        update_progress("AI Analysis with Claude", 82, f"Analyzing {len(all_params)} parameters with Claude...")
-        data_rows = []
-        for i, param in enumerate(all_params):
-            notion_json = notion_lookup.get(param, {})
-            erp_json = erp_lookup.get(param, {})
-            
-            # Use Claude for comparison only if both sides exist
-            if notion_json and erp_json:
-                comparison_text = compare_with_claude(notion_json, erp_json)
-            elif notion_json and not erp_json:
-                comparison_text = "Parameter missing in ERP"
-            elif erp_json and not notion_json:
-                comparison_text = "Parameter missing in Notion"
+        logger.info(
+            "Total parameters: Notion=%d, ERP=%d, Combined=%d",
+            len(notion_lookup),
+            len(erp_lookup),
+            len(all_params),
+        )
+
+        update_progress(
+            "AI Analysis with Claude", 82, f"Analyzing {len(all_params)} parameters with Claude…"
+        )
+
+        import json
+        data_rows: list[list[str]] = []
+        for idx, param in enumerate(all_params):
+            n_json = notion_lookup.get(param, {})
+            e_json = erp_lookup.get(param, {})
+
+            if n_json and e_json:
+                cmp_text = compare_with_claude(n_json, e_json)
+            elif n_json and not e_json:
+                cmp_text = "Parameter missing in ERP"
+            elif e_json and not n_json:
+                cmp_text = "Parameter missing in Notion"
             else:
-                comparison_text = "No data"
-            
-            import json
-            data_rows.append([
-                param,
-                json.dumps(notion_json, ensure_ascii=False, indent=2),
-                json.dumps(erp_json, ensure_ascii=False, indent=2),
-                comparison_text,
-            ])
-            
-            # Update progress during analysis
-            if i % 5 == 0:  # Update every 5 parameters
-                progress = 82 + (i / len(all_params)) * 8  # 82-90%
-                update_progress("AI Analysis with Claude", int(progress), f"Analyzed {i+1}/{len(all_params)} parameters")
-        
-        update_progress("Generating comparison report", 90, "Analysis complete, preparing report...")
-        
-        # Create Google Sheet
-        logger.info("Creating Google Sheet...")
-        update_progress("Creating Google Sheet", 95, "Setting up Google Sheets...")
+                cmp_text = "No data"
+
+            data_rows.append(
+                [
+                    param,
+                    json.dumps(n_json, ensure_ascii=False, indent=2),
+                    json.dumps(e_json, ensure_ascii=False, indent=2),
+                    cmp_text,
+                ]
+            )
+
+            if idx % 5 == 0:
+                pct = 82 + int((idx / len(all_params)) * 8)  # 82-90 %
+                update_progress(
+                    "AI Analysis with Claude",
+                    pct,
+                    f"Analyzed {idx + 1}/{len(all_params)} parameters",
+                )
+
+            if cancel_event.is_set():
+                update_progress("Cancelled", progress_data.get("progress_percentage", 0), "Validation cancelled by user")
+                progress_data["status"] = "cancelled"
+                return ComparisonResponse(success=False, message="Validation cancelled by user")
+
+        # -------------------------------------------------------
+        # 2.d Create Google Sheet
+        # -------------------------------------------------------
+        update_progress("Generating comparison report", 90, "Analysis complete, preparing report…")
+        update_progress("Creating Google Sheet", 95, "Setting up Google Sheets…")
+
         sheet_url = create_shared_google_sheet(data_rows)
         update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
-        
-        elapsed_time = time.time() - start_time
-        
-        # Mark as completed
+
+        elapsed = time.time() - start_time
         progress_data["status"] = "completed"
-        
+
+        # Before returning, check cancellation once more
+        if cancel_event.is_set():
+            progress_data["status"] = "cancelled"
+            return ComparisonResponse(success=False, message="Validation cancelled by user")
+
         return ComparisonResponse(
             success=True,
-            message=f"Comparison completed successfully in {elapsed_time:.1f} seconds!",
+            message=f"Comparison completed successfully in {elapsed:.1f} seconds!",
             sheet_url=sheet_url,
             summary={
                 "notionRecords": len(notion_records),
                 "erpRecords": len(erp_records),
                 "totalRows": len(data_rows),
-                "processingTime": f"{elapsed_time:.1f}s"
-            }
+                "processingTime": f"{elapsed:.1f}s",
+            },
         )
-        
-    except Exception as e:
-        logger.error(f"Comparison failed: {e}")
-        return ComparisonResponse(
-            success=False,
-            message=f"Comparison failed: {str(e)}"
+
+    # ---------------------------------------------------------------
+    # 3. Off-load work to a background thread & await result
+    # ---------------------------------------------------------------
+    try:
+        response: ComparisonResponse = await asyncio.to_thread(
+            _perform_comparison, request.page_id, request.prompt_name
         )
+        return response
+    except Exception as exc:
+        logger.exception("Comparison failed: %s", exc)
+        return ComparisonResponse(success=False, message=f"Comparison failed: {exc}")
 
 @app.get("/health")
 async def health_check():
@@ -220,7 +278,35 @@ async def health_check():
 @app.get("/api/progress")
 async def get_progress():
     """Get current progress status"""
+    logger.debug(f"Progress requested: {progress_data}")
     return progress_data
+
+@app.post("/api/reset-progress")
+async def reset_progress_endpoint():
+    """Reset progress status"""
+    reset_progress()
+    return {"message": "Progress reset successfully"}
+
+@app.post("/api/test-progress")
+async def test_progress():
+    """Test progress updates"""
+    reset_progress()
+    for i in range(0, 101, 10):
+        update_progress("Testing progress", i, f"Test step {i}")
+        await asyncio.sleep(0.1)
+    progress_data["status"] = "completed"
+    return {"message": "Progress test completed"}
+
+@app.post("/api/stop")
+async def stop_validation():
+    """Signal cancellation of the running validation job."""
+    if progress_data.get("status") != "running":
+        return {"message": "No validation in progress"}
+
+    cancel_event.set()
+    progress_data["status"] = "cancelled"
+    update_progress("Cancelling", progress_data.get("progress_percentage", 0), "User requested cancellation")
+    return {"message": "Cancellation signal sent"}
 
 if __name__ == "__main__":
     import uvicorn
