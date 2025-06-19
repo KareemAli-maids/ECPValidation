@@ -369,19 +369,38 @@ def fetch_ids() -> List[int]:
     return ids
 
 def fetch_one(ident: int) -> Dict[str, Any]:
-    """Fetch a single GPTPromptParameter record by ID."""
-    resp = requests.get(f"{API_ROOT}/{ident}", headers=DETAIL_HEADERS, timeout=30)
-    logging.info("GET %s → %s", ident, resp.status_code)
-    
-    if resp.status_code in (401, 403):
-        raise ValueError("ERP Auth token expired. Please update your .env file.")
-    
-    if resp.status_code != 200:
-        preview = textwrap.shorten(resp.text, width=120, placeholder=" …")
-        logging.warning("Non‑200 body preview: %s", preview)
-    
-    resp.raise_for_status()
-    return resp.json()
+    """Fetch a single GPTPromptParameter record by ID with retry/back-off."""
+    max_attempts = 3
+    backoff = 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(f"{API_ROOT}/{ident}", headers=DETAIL_HEADERS, timeout=30)
+            logging.info("GET %s → %s (attempt %d)", ident, resp.status_code, attempt)
+
+            # Auth failures should abort immediately
+            if resp.status_code in (401, 403):
+                raise ValueError("ERP Auth token expired. Please update your .env file.")
+
+            if resp.status_code == 200:
+                return resp.json()
+
+            # For transient 5xx errors – retry
+            if 500 <= resp.status_code < 600:
+                raise requests.HTTPError(f"ERP 5xx error: {resp.status_code}")
+
+            # Unexpected non-200, non-5xx – log and break
+            preview = textwrap.shorten(resp.text, width=120, placeholder=" …")
+            logging.warning("Non-200 body preview (id=%s): %s", ident, preview)
+            break
+        except Exception as exc:
+            logging.warning("fetch_one id=%s failed on attempt %d/%d: %s", ident, attempt, max_attempts, exc)
+            if attempt == max_attempts:
+                raise
+            time.sleep(backoff)
+            backoff *= 2  # exponential back-off
+
+    # If we reach here all retries failed
+    raise RuntimeError(f"Failed to fetch ERP record {ident} after {max_attempts} attempts")
 
 # ---------------------------------------------------------------------------
 # NOTION HELPERS (copied from kareemdatabasetest.py)
