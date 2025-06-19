@@ -18,7 +18,7 @@ from datetime import datetime
 import threading
 
 # Import our comparison logic
-from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet
+from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet, truncate_cell_content
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -210,12 +210,16 @@ async def compare_data(request: ComparisonRequest):
             # Use Claude for comparison since both exist
             cmp_text = compare_with_claude(n_json, e_json)
 
+            # Format JSON with compact formatting and truncate if necessary
+            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
+            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
+            
             data_rows.append(
                 [
                     param,
-                    json.dumps(n_json, ensure_ascii=False, indent=2),
-                    json.dumps(e_json, ensure_ascii=False, indent=2),
-                    cmp_text,
+                    truncate_cell_content(notion_json_str),
+                    truncate_cell_content(erp_json_str),
+                    truncate_cell_content(cmp_text),
                 ]
             )
 
@@ -236,11 +240,12 @@ async def compare_data(request: ComparisonRequest):
         update_progress("Adding ERP-only parameters", 88, f"Adding {len(erp_only_params)} ERP-only parameters…")
         for param in erp_only_params:
             e_json = erp_lookup[param]
+            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
             data_rows.append(
                 [
                     param,
                     "{}",  # Empty JSON for Notion
-                    json.dumps(e_json, ensure_ascii=False, indent=2),
+                    truncate_cell_content(erp_json_str),
                     "Parameter missing in Notion",
                 ]
             )
@@ -249,10 +254,11 @@ async def compare_data(request: ComparisonRequest):
         update_progress("Adding Notion-only parameters", 89, f"Adding {len(notion_only_params)} Notion-only parameters…")
         for param in notion_only_params:
             n_json = notion_lookup[param]
+            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
             data_rows.append(
                 [
                     param,
-                    json.dumps(n_json, ensure_ascii=False, indent=2),
+                    truncate_cell_content(notion_json_str),
                     "{}",  # Empty JSON for ERP
                     "Parameter missing in ERP",
                 ]
@@ -266,10 +272,10 @@ async def compare_data(request: ComparisonRequest):
 
         # Organize data with section headers
         organized_data = []
+        section_headers = []  # Track which rows are section headers for formatting
         
-        # Section 1: AI Comparisons (parameters in both systems)
+        # Section 1: AI Comparisons (parameters in both systems) - NO HEADER
         if both_params:
-            organized_data.append(["=== AI COMPARISONS (Parameters in Both Systems) ===", "", "", ""])
             for i, row in enumerate(data_rows):
                 if i < len(both_params):  # Only the first N rows are comparisons
                     organized_data.append(row)
@@ -277,7 +283,9 @@ async def compare_data(request: ComparisonRequest):
         # Section 2: ERP-only parameters
         if erp_only_params:
             organized_data.append(["", "", "", ""])  # Empty row for spacing
+            header_row_index = len(organized_data)
             organized_data.append(["=== ERP-ONLY PARAMETERS ===", "", "", ""])
+            section_headers.append(header_row_index)  # Track this row for red highlighting
             for i, row in enumerate(data_rows):
                 if len(both_params) <= i < len(both_params) + len(erp_only_params):
                     organized_data.append(row)
@@ -285,12 +293,14 @@ async def compare_data(request: ComparisonRequest):
         # Section 3: Notion-only parameters
         if notion_only_params:
             organized_data.append(["", "", "", ""])  # Empty row for spacing
+            header_row_index = len(organized_data)
             organized_data.append(["=== NOTION-ONLY PARAMETERS ===", "", "", ""])
+            section_headers.append(header_row_index)  # Track this row for red highlighting
             for i, row in enumerate(data_rows):
                 if i >= len(both_params) + len(erp_only_params):
                     organized_data.append(row)
 
-        sheet_url = create_shared_google_sheet(organized_data)
+        sheet_url = create_shared_google_sheet(organized_data, section_headers)
         update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
 
         elapsed = time.time() - start_time

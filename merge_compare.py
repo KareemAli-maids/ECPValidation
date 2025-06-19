@@ -851,7 +851,7 @@ def gather_notion_data() -> List[Dict[str, Any]]:
 # Google Sheets Helper
 # ---------------------------------------------------------------------------
 
-def create_shared_google_sheet(data_rows: List[List[str]]) -> str:
+def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None) -> str:
     """Create a Google Sheet with comparison data and share it with anyone who has the link."""
     try:
         # Set up credentials and authorize
@@ -934,6 +934,29 @@ def create_shared_google_sheet(data_rows: List[List[str]]) -> str:
             "wrapStrategy": "WRAP"
         })
         
+        # Format section headers (red highlighting, merge cells, no wrap)
+        if section_headers:
+            print("Formatting section headers...")
+            for header_row_index in section_headers:
+                actual_row = header_row_index + 2  # +2 because we start after main header row
+                
+                # Merge cells across the row for the header
+                try:
+                    worksheet.merge_cells(f'A{actual_row}:D{actual_row}')
+                    print(f"✅ Merged cells for section header at row {actual_row}")
+                except Exception as merge_error:
+                    print(f"⚠️ Could not merge cells for row {actual_row}: {merge_error}")
+                
+                # Apply red background and bold formatting
+                header_range = f'A{actual_row}:D{actual_row}'
+                worksheet.format(header_range, {
+                    'backgroundColor': {'red': 0.9, 'green': 0.2, 'blue': 0.2},  # Red background
+                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},  # White text
+                    'horizontalAlignment': 'CENTER',
+                    'wrapStrategy': 'CLIP'  # No wrapping for headers
+                })
+                print(f"✅ Applied red formatting to section header at row {actual_row}")
+        
         # Share with anyone who has the link (instead of domain restriction)
         print("Attempting to share with anyone who has the link...")
         try:
@@ -967,6 +990,19 @@ def create_shared_google_sheet(data_rows: List[List[str]]) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def truncate_cell_content(content: str, max_chars: int = 45000) -> str:
+    """Truncate content to fit within Google Sheets cell limit (50,000 chars)."""
+    if len(content) <= max_chars:
+        return content
+    
+    truncated = content[:max_chars]
+    # Try to truncate at a reasonable boundary (end of line)
+    last_newline = truncated.rfind('\n')
+    if last_newline > max_chars * 0.8:  # If we can find a newline in the last 20%
+        truncated = truncated[:last_newline]
+    
+    return truncated + f"\n\n... [TRUNCATED - Original length: {len(content)} chars]"
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
 
@@ -997,11 +1033,15 @@ def main() -> None:
         else:
             comparison_text = "No data"
 
+        # Format JSON with compact formatting and truncate if necessary
+        notion_json_str = json.dumps(notion_json, ensure_ascii=False, separators=(',', ':'))
+        erp_json_str = json.dumps(erp_json, ensure_ascii=False, separators=(',', ':'))
+        
         data_rows.append([
             param,
-            json.dumps(notion_json, ensure_ascii=False, indent=2),
-            json.dumps(erp_json, ensure_ascii=False, indent=2),
-            comparison_text,
+            truncate_cell_content(notion_json_str),
+            truncate_cell_content(erp_json_str),
+            truncate_cell_content(comparison_text),
         ])
 
     # Create shared Google Sheet
