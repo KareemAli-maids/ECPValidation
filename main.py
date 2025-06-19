@@ -180,32 +180,35 @@ async def compare_data(request: ComparisonRequest):
         # -------------------------------------------------------
         notion_lookup = {r["parameter"].lower(): r for r in notion_records if r.get("parameter")}
         erp_lookup = {r["parameter"].lower(): r for r in erp_records if r.get("parameter")}
-        all_params = sorted(set(notion_lookup) | set(erp_lookup))
+        
+        # Separate parameters into different categories
+        both_params = sorted(set(notion_lookup) & set(erp_lookup))  # Parameters in both systems
+        notion_only_params = sorted(set(notion_lookup) - set(erp_lookup))  # Only in Notion
+        erp_only_params = sorted(set(erp_lookup) - set(notion_lookup))  # Only in ERP
+        
         logger.info(
-            "Total parameters: Notion=%d, ERP=%d, Combined=%d",
+            "Parameter distribution: Notion=%d, ERP=%d, Both=%d, Notion-only=%d, ERP-only=%d",
             len(notion_lookup),
             len(erp_lookup),
-            len(all_params),
+            len(both_params),
+            len(notion_only_params),
+            len(erp_only_params),
         )
 
         update_progress(
-            "AI Analysis with Claude", 82, f"Analyzing {len(all_params)} parameters with Claude…"
+            "AI Analysis with Claude", 82, f"Analyzing {len(both_params)} parameters with Claude…"
         )
 
         import json
         data_rows: list[list[str]] = []
-        for idx, param in enumerate(all_params):
-            n_json = notion_lookup.get(param, {})
-            e_json = erp_lookup.get(param, {})
-
-            if n_json and e_json:
-                cmp_text = compare_with_claude(n_json, e_json)
-            elif n_json and not e_json:
-                cmp_text = "Parameter missing in ERP"
-            elif e_json and not n_json:
-                cmp_text = "Parameter missing in Notion"
-            else:
-                cmp_text = "No data"
+        
+        # First, process parameters that exist in BOTH systems (with Claude comparison)
+        for idx, param in enumerate(both_params):
+            n_json = notion_lookup[param]
+            e_json = erp_lookup[param]
+            
+            # Use Claude for comparison since both exist
+            cmp_text = compare_with_claude(n_json, e_json)
 
             data_rows.append(
                 [
@@ -217,25 +220,77 @@ async def compare_data(request: ComparisonRequest):
             )
 
             if idx % 5 == 0:
-                pct = 82 + int((idx / len(all_params)) * 8)  # 82-90 %
+                pct = 82 + int((idx / len(both_params)) * 6)  # 82-88%
                 update_progress(
                     "AI Analysis with Claude",
                     pct,
-                    f"Analyzed {idx + 1}/{len(all_params)} parameters",
+                    f"Analyzed {idx + 1}/{len(both_params)} parameters",
                 )
 
             if cancel_event.is_set():
                 update_progress("Cancelled", progress_data.get("progress_percentage", 0), "Validation cancelled by user")
                 progress_data["status"] = "cancelled"
                 return ComparisonResponse(success=False, message="Validation cancelled by user")
+        
+        # Then, add parameters that exist only in ERP (no Claude comparison)
+        update_progress("Adding ERP-only parameters", 88, f"Adding {len(erp_only_params)} ERP-only parameters…")
+        for param in erp_only_params:
+            e_json = erp_lookup[param]
+            data_rows.append(
+                [
+                    param,
+                    "{}",  # Empty JSON for Notion
+                    json.dumps(e_json, ensure_ascii=False, indent=2),
+                    "Parameter missing in Notion",
+                ]
+            )
+        
+        # Finally, add parameters that exist only in Notion (no Claude comparison)
+        update_progress("Adding Notion-only parameters", 89, f"Adding {len(notion_only_params)} Notion-only parameters…")
+        for param in notion_only_params:
+            n_json = notion_lookup[param]
+            data_rows.append(
+                [
+                    param,
+                    json.dumps(n_json, ensure_ascii=False, indent=2),
+                    "{}",  # Empty JSON for ERP
+                    "Parameter missing in ERP",
+                ]
+            )
 
         # -------------------------------------------------------
-        # 2.d Create Google Sheet
+        # 2.d Create Google Sheet with organized sections
         # -------------------------------------------------------
         update_progress("Generating comparison report", 90, "Analysis complete, preparing report…")
         update_progress("Creating Google Sheet", 95, "Setting up Google Sheets…")
 
-        sheet_url = create_shared_google_sheet(data_rows)
+        # Organize data with section headers
+        organized_data = []
+        
+        # Section 1: AI Comparisons (parameters in both systems)
+        if both_params:
+            organized_data.append(["=== AI COMPARISONS (Parameters in Both Systems) ===", "", "", ""])
+            for i, row in enumerate(data_rows):
+                if i < len(both_params):  # Only the first N rows are comparisons
+                    organized_data.append(row)
+        
+        # Section 2: ERP-only parameters
+        if erp_only_params:
+            organized_data.append(["", "", "", ""])  # Empty row for spacing
+            organized_data.append(["=== ERP-ONLY PARAMETERS ===", "", "", ""])
+            for i, row in enumerate(data_rows):
+                if len(both_params) <= i < len(both_params) + len(erp_only_params):
+                    organized_data.append(row)
+        
+        # Section 3: Notion-only parameters
+        if notion_only_params:
+            organized_data.append(["", "", "", ""])  # Empty row for spacing
+            organized_data.append(["=== NOTION-ONLY PARAMETERS ===", "", "", ""])
+            for i, row in enumerate(data_rows):
+                if i >= len(both_params) + len(erp_only_params):
+                    organized_data.append(row)
+
+        sheet_url = create_shared_google_sheet(organized_data)
         update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
 
         elapsed = time.time() - start_time
@@ -253,7 +308,8 @@ async def compare_data(request: ComparisonRequest):
             summary={
                 "notionRecords": len(notion_records),
                 "erpRecords": len(erp_records),
-                "totalRows": len(data_rows),
+                "totalComparisons": len(both_params),  # Only parameters that exist in both systems
+                "totalRows": len(data_rows),  # Total rows in the sheet
                 "processingTime": f"{elapsed:.1f}s",
             },
         )
