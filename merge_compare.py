@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import textwrap
+import threading
 import time
 import concurrent.futures
 from pathlib import Path
@@ -411,30 +412,65 @@ def _fetch_all_children(block_id: str) -> List[dict]:
     log.debug("Fetching children for block: %s", block_id[:8] + "...")
     children, cursor = [], None
     page_count = 0
+    max_retries = 5
     
     while True:
-        try:
-            page_count += 1
-            log.debug("Fetching page %d of children for block %s...", page_count, block_id[:8] + "...")
-            resp = notion.blocks.children.list(
-                block_id, start_cursor=cursor, page_size=100
-            )
-        except RequestTimeoutError:
-            if page_count < 3:
-                log.warning("Request timeout when fetching children for block %s – retrying (%d/3)", block_id[:8] + "...", page_count)
-                time.sleep(2 ** page_count)
-                continue
-            else:
-                log.error("Repeated timeouts when fetching children for block %s – giving up", block_id[:8] + "...")
-                break
-        except APIResponseError as e:
-            log.warning(
-                "Skipping inaccessible block's children: %s  (status %s, code %s)",
-                block_id,
-                getattr(e, "status", "??"),
-                getattr(e, "code", "??"),
-            )
-            break
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                page_count += 1
+                log.debug("Fetching page %d of children for block %s...", page_count, block_id[:8] + "...")
+                resp = notion.blocks.children.list(
+                    block_id, start_cursor=cursor, page_size=100
+                )
+                break  # Success, exit retry loop
+                
+            except RequestTimeoutError:
+                retry_count += 1
+                if retry_count < max_retries:
+                    wait_time = 2 ** retry_count
+                    log.warning("Request timeout when fetching children for block %s – retrying (%d/%d) in %ds", 
+                              block_id[:8] + "...", retry_count, max_retries, wait_time)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log.error("Repeated timeouts when fetching children for block %s – giving up", block_id[:8] + "...")
+                    return children
+                    
+            except APIResponseError as e:
+                status = getattr(e, "status", None)
+                code = getattr(e, "code", None)
+                
+                # Handle rate limiting with exponential backoff
+                if status == 429 or code == "rate_limited":
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        # Exponential backoff with jitter for rate limiting
+                        base_wait = 2 ** retry_count
+                        jitter = base_wait * 0.1 * (0.5 - time.time() % 1)  # Random jitter
+                        wait_time = base_wait + jitter
+                        log.warning("Rate limited when fetching children for block %s – retrying (%d/%d) in %.1fs", 
+                                  block_id[:8] + "...", retry_count, max_retries, wait_time)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        log.error("Rate limit exceeded for block %s after %d retries – giving up", 
+                                block_id[:8] + "...", max_retries)
+                        return children
+                
+                # Handle other errors (403, 404, etc.) - don't retry these
+                else:
+                    log.warning(
+                        "Skipping inaccessible block's children: %s  (status %s, code %s)",
+                        block_id,
+                        status or "??",
+                        code or "??",
+                    )
+                    return children
+        else:
+            # If we exhausted all retries without success
+            log.error("Failed to fetch children for block %s after %d retries", block_id[:8] + "...", max_retries)
+            return children
 
         children.extend(resp["results"])
         log.debug("Added %d children from page %d (total: %d)", len(resp["results"]), page_count, len(children))
@@ -686,6 +722,8 @@ def gather_erp_data() -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     completed_count = 0
     
+    progress_lock = threading.Lock()  # Thread-safe progress updates
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all fetch tasks first
         futures = {executor.submit(fetch_one, ident): ident for ident in ids}
@@ -697,18 +735,23 @@ def gather_erp_data() -> List[Dict[str, Any]]:
                 raw = future.result()
                 converted = convert_record(raw)
                 records.append(converted)
-                completed_count += 1
                 
-                # Update global progress if callback is available (70-80% range for ERP)
-                if progress_callback and len(ids) > 0:
-                    progress_pct = 70 + int((completed_count / len(ids)) * 10)  # 70-80%
-                    progress_callback("Fetching ERP data", progress_pct, f"Retrieved {completed_count}/{len(ids)} ERP records")
+                # Thread-safe progress update
+                with progress_lock:
+                    completed_count += 1
+                    # Update global progress if callback is available (70-80% range for ERP)
+                    if progress_callback and len(ids) > 0:
+                        progress_pct = 70 + int((completed_count / len(ids)) * 10)  # 70-80%
+                        progress_callback("Fetching ERP data", progress_pct, f"Retrieved {completed_count}/{len(ids)} ERP records")
                     
                 # Stop early if cancellation requested
                 if cancel_event and cancel_event.is_set():
                     break
             except Exception as e:
                 logging.error("Failed to fetch ERP ID %s: %s", ident, e)
+                # Still increment completed count for failed records to maintain progress accuracy
+                with progress_lock:
+                    completed_count += 1
 
     logging.info("Fetched %d ERP records", len(records))
     return records
@@ -761,8 +804,9 @@ def gather_notion_data() -> List[Dict[str, Any]]:
 
     # Process pages concurrently using thread pool
     records: List[Dict[str, Any]] = []
-    max_workers = min(4, len(pages))  # Cap at 16 to avoid overwhelming Notion API
+    max_workers = min(2, len(pages))  # Cap at 2 to be more respectful of Notion API rate limits
     completed_count = 0
+    progress_lock = threading.Lock()  # Thread-safe progress updates
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all page processing tasks
@@ -778,12 +822,17 @@ def gather_notion_data() -> List[Dict[str, Any]]:
                 obj = future.result()
                 if obj:
                     records.append(obj)
-                completed_count += 1
                 
-                # Update global progress if callback is available (5-65% range for Notion, 60% of total)
-                if progress_callback and len(pages) > 0:
-                    progress_pct = 5 + int((completed_count / len(pages)) * 60)  # 5-65%
-                    progress_callback("Fetching Notion data", progress_pct, f"Processed {completed_count}/{len(pages)} Notion pages")
+                # Thread-safe progress update
+                with progress_lock:
+                    completed_count += 1
+                    # Update global progress if callback is available (5-65% range for Notion, 60% of total)
+                    if progress_callback and len(pages) > 0:
+                        progress_pct = 5 + int((completed_count / len(pages)) * 60)  # 5-65%
+                        progress_callback("Fetching Notion data", progress_pct, f"Processed {completed_count}/{len(pages)} Notion pages")
+                    
+                # Small delay to be respectful of API rate limits
+                time.sleep(0.1)
                     
                 # Early exit on cancellation
                 if cancel_event and cancel_event.is_set():
@@ -791,6 +840,9 @@ def gather_notion_data() -> List[Dict[str, Any]]:
             except Exception as e:
                 page_id = page.get("id", "unknown")
                 logging.error("Failed to process Notion page %s (index %d): %s", page_id, idx, e)
+                # Still increment completed count for failed pages to maintain progress accuracy
+                with progress_lock:
+                    completed_count += 1
     
     logging.info("Processed %d Notion pages, extracted %d records", len(pages), len(records))
     return records
