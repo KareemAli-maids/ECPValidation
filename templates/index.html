@@ -770,8 +770,12 @@
                         <div class="summary-label">ERP Records</div>
                     </div>
                     <div class="summary-card">
+                        <div class="summary-value">${data.summary.totalComparisons || 0}</div>
+                        <div class="summary-label">AI Comparisons</div>
+                    </div>
+                    <div class="summary-card">
                         <div class="summary-value">${data.summary.totalRows}</div>
-                        <div class="summary-label">Total Comparisons</div>
+                        <div class="summary-label">Total Rows</div>
                     </div>
                     <div class="summary-card">
                         <div class="summary-value">${data.summary.processingTime || 'N/A'}</div>
