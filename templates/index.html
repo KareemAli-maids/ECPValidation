@@ -228,6 +228,14 @@
             color: white;
             padding: 1.5rem;
             text-align: center;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .progress-header h2 {
+            margin: 0;
+            flex: 1;
         }
 
         .progress-content {
@@ -414,6 +422,29 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        .stop-btn {
+            background: #e84545;
+            color: #fff;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+            box-shadow: 0 2px 4px rgba(232, 69, 69, 0.3);
+            min-width: 80px;
+            justify-content: center;
+        }
+        .stop-btn:hover { 
+            background: #d62828; 
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(232, 69, 69, 0.4);
+        }
     </style>
 </head>
 <body>
@@ -459,7 +490,7 @@
                                     id="pageId" 
                                     name="pageId" 
                                     class="form-input"
-                                    placeholder="e.g., 2107432eb8438023a107efb79e1ddc56"
+                                    placeholder="e.g., https://www.notion.so/2107432ebxxyyyy"
                                 >
                                 <div class="form-help">
                                     Extract from Notion page URL or leave empty to skip Notion validation
@@ -504,7 +535,9 @@
         <div class="progress-container" id="progressContainer">
             <div class="progress-header">
                 <h2><i class="fas fa-cogs"></i> Validation in Progress</h2>
-                <p>Please wait while we analyze your data...</p>
+                <button id="stopBtn" class="stop-btn" onclick="stopValidation()" style="display: none;">
+                    <i class="fas fa-stop"></i> Stop
+                </button>
             </div>
             <div class="progress-content">
                 <div class="progress-percentage" id="progressPercentage">0%</div>
@@ -532,7 +565,7 @@
                     <!-- Summary cards will be inserted here -->
                 </div>
                 <div style="text-align: center;">
-                    <a href="#" class="sheet-link" id="sheetLink" style="display: none;">
+                    <a href="#" class="sheet-link" id="sheetLink" style="display: none;" target="_blank" rel="noopener noreferrer">
                         <i class="fas fa-table"></i>
                         <span>View Detailed Results</span>
                     </a>
@@ -546,17 +579,8 @@
 
     <script>
         let validationStartTime;
-        let currentStep = 0;
-        const totalSteps = 6;
-
-        const steps = [
-            { name: 'Initializing validation process', icon: 'fas fa-play', duration: 1000 },
-            { name: 'Fetching Notion data', icon: 'fab fa-notion', duration: 4000 },
-            { name: 'Fetching ERP data', icon: 'fas fa-server', duration: 3000 },
-            { name: 'AI Analysis with Claude', icon: 'fas fa-robot', duration: 8000 },
-            { name: 'Generating comparison report', icon: 'fas fa-chart-line', duration: 3000 },
-            { name: 'Creating Google Sheet', icon: 'fas fa-table', duration: 2000 }
-        ];
+        let progressPollingInterval;
+        let isValidationRunning = false;
 
         document.getElementById('validationForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -575,10 +599,9 @@
         function startValidation(pageId, promptName) {
             validationStartTime = new Date();
             
-            // Reset progress state
-            currentStep = 0;
-            document.getElementById('progressPercentage').textContent = '0%';
-            document.getElementById('progressBar').style.width = '0%';
+            // Reset progress state completely
+            isValidationRunning = true;
+            updateProgress(0); // Ensure we start at 0%
             
             // Clear and initialize logs
             const logsContainer = document.getElementById('progressLogs');
@@ -589,51 +612,70 @@
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('resultContainer').style.display = 'none';
             
-            // Start progress simulation
-            simulateProgress();
+            // Show stop button
+            const stopBtn = document.getElementById('stopBtn');
+            stopBtn.style.display = 'inline-flex';
+            stopBtn.style.visibility = 'visible';
+            console.log('Stop button should now be visible:', stopBtn);
+            
+            // Start real progress polling
+            startProgressPolling();
             
             // Make actual API call
             makeValidationRequest(pageId, promptName);
         }
 
-        function simulateProgress() {
-            let stepProgress = 0;
-            const baseProgress = 100 / totalSteps;
+        let lastLogCount = 0; // Track how many logs we've already displayed
+        
+        function startProgressPolling() {
+            lastLogCount = 0; // Reset log counter for new validation
             
-            function processStep() {
-                if (currentStep >= totalSteps) return;
+            progressPollingInterval = setInterval(async () => {
+                if (!isValidationRunning) return;
                 
-                const step = steps[currentStep];
-                const stepStart = currentStep * baseProgress;
-                
-                // Add log entry for current step
-                addLogEntry(step.name, 'info', step.icon);
-                
-                // Animate progress within current step
-                let localProgress = 0;
-                const stepInterval = setInterval(() => {
-                    localProgress += 1;
-                    const currentProgress = stepStart + (localProgress / 100) * baseProgress * 0.9;
-                    updateProgress(Math.min(currentProgress, stepStart + baseProgress * 0.9));
+                try {
+                    const response = await fetch('/api/progress');
+                    const progressData = await response.json();
                     
-                    if (localProgress >= 90) {
-                        clearInterval(stepInterval);
+                    // Update progress bar
+                    updateProgress(progressData.progress_percentage);
+                    
+                    // Add new log entries
+                    if (progressData.logs && progressData.logs.length > lastLogCount) {
+                        // Add only new logs since last update
+                        for (let i = lastLogCount; i < progressData.logs.length; i++) {
+                            const log = progressData.logs[i];
+                            addLogEntryWithTimestamp(log.message, log.type, getIconForStep(log.message), log.timestamp);
+                        }
+                        lastLogCount = progressData.logs.length;
                     }
-                }, step.duration / 90);
-                
-                // Move to next step
-                setTimeout(() => {
-                    currentStep++;
-                    processStep();
-                }, step.duration);
-            }
-            
-            processStep();
+                    
+                    // Check if completed or failed
+                    if (progressData.status === 'completed' || progressData.status === 'error') {
+                        clearInterval(progressPollingInterval);
+                        isValidationRunning = false;
+                        // The makeValidationRequest function will handle showing results
+                    }
+                    
+                } catch (error) {
+                    console.error('Progress polling error:', error);
+                }
+            }, 500); // Poll every 500ms
+        }
+        
+        function getIconForStep(message) {
+            if (message.toLowerCase().includes('notion')) return 'fab fa-notion';
+            if (message.toLowerCase().includes('erp')) return 'fas fa-server';
+            if (message.toLowerCase().includes('claude') || message.toLowerCase().includes('ai')) return 'fas fa-robot';
+            if (message.toLowerCase().includes('sheet')) return 'fas fa-table';
+            if (message.toLowerCase().includes('report')) return 'fas fa-chart-line';
+            return 'fas fa-info-circle';
         }
 
-        function updateProgress(percentage, step) {
-            document.getElementById('progressPercentage').textContent = Math.round(percentage) + '%';
-            document.getElementById('progressBar').style.width = percentage + '%';
+        function updateProgress(percentage) {
+            const roundedPercentage = Math.max(0, Math.min(100, Math.round(percentage)));
+            document.getElementById('progressPercentage').textContent = roundedPercentage + '%';
+            document.getElementById('progressBar').style.width = roundedPercentage + '%';
         }
 
         function addLogEntry(message, type = 'info', icon = 'fas fa-info-circle') {
@@ -648,6 +690,21 @@
             logsContainer.appendChild(logEntry);
             logsContainer.scrollTop = logsContainer.scrollHeight;
         }
+        
+        function addLogEntryWithTimestamp(message, type = 'info', icon = 'fas fa-info-circle', timestamp) {
+            const logsContainer = document.getElementById('progressLogs');
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry ${type}`;
+            logEntry.innerHTML = `
+                <i class="${icon}"></i>
+                <span class="log-timestamp">${timestamp}</span>
+                <span>${message}</span>
+            `;
+            logsContainer.appendChild(logEntry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+        
+
 
         async function makeValidationRequest(pageId, promptName) {
             try {
@@ -664,10 +721,12 @@
                 
                 const data = await response.json();
                 
-                // Complete progress
-                currentStep = totalSteps; // Stop the simulation
+                // Stop progress polling
+                clearInterval(progressPollingInterval);
+                isValidationRunning = false;
+                
+                // Ensure we're at 100%
                 updateProgress(100);
-                addLogEntry('Validation completed successfully!', 'success', 'fas fa-check-circle');
                 
                 setTimeout(() => {
                     if (response.ok && data.success) {
@@ -675,12 +734,12 @@
                     } else {
                         showError(data.message || data.detail || 'Validation failed');
                     }
-                }, 1500);
+                }, 500);
                 
             } catch (error) {
-                currentStep = totalSteps; // Stop the simulation
-                addLogEntry('Validation failed: ' + error.message, 'error', 'fas fa-exclamation-triangle');
-                setTimeout(() => showError('Network error: ' + error.message), 1500);
+                clearInterval(progressPollingInterval);
+                isValidationRunning = false;
+                setTimeout(() => showError('Network error: ' + error.message), 500);
             }
         }
 
@@ -697,6 +756,7 @@
             resultHeader.className = 'result-header success';
             resultTitle.innerHTML = '<i class="fas fa-check-circle"></i> Validation Completed Successfully';
             resultMessage.textContent = data.message;
+            document.getElementById('stopBtn').style.display = 'none';
             
             // Create summary cards
             if (data.summary) {
@@ -722,7 +782,16 @@
             
             if (data.sheet_url) {
                 sheetLink.href = data.sheet_url;
+                sheetLink.target = '_blank';
+                sheetLink.rel = 'noopener noreferrer';
                 sheetLink.style.display = 'inline-flex';
+                
+                // Add explicit click handler to ensure new tab behavior
+                sheetLink.onclick = function(e) {
+                    e.preventDefault();
+                    window.open(data.sheet_url, '_blank', 'noopener,noreferrer');
+                    return false;
+                };
             }
         }
 
@@ -739,6 +808,7 @@
             resultHeader.className = 'result-header error';
             resultTitle.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Validation Failed';
             resultMessage.textContent = message;
+            document.getElementById('stopBtn').style.display = 'none';
             resultSummary.innerHTML = '';
             sheetLink.style.display = 'none';
         }
@@ -752,9 +822,11 @@
             document.getElementById('validationForm').reset();
             
             // Reset progress state
-            currentStep = totalSteps; // Stop any running simulation
+            clearInterval(progressPollingInterval);
+            isValidationRunning = false;
             document.getElementById('progressPercentage').textContent = '0%';
             document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('stopBtn').style.display = 'none';
             document.getElementById('progressLogs').innerHTML = `
                 <div class="log-entry info">
                     <i class="fas fa-info-circle"></i>
@@ -772,6 +844,27 @@
                 second: '2-digit' 
             });
         }
+
+        async function stopValidation() {
+            if (!isValidationRunning) return;
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+            } catch (err) {
+                console.error('Stop request failed', err);
+            }
+            clearInterval(progressPollingInterval);
+            isValidationRunning = false;
+            addLogEntry('Validation cancelled by user', 'error', 'fas fa-ban');
+            updateProgress(0);
+            showError('Validation cancelled by user');
+        }
+
+        // Send cancel beacon when tab/window closes
+        window.addEventListener('beforeunload', () => {
+            if (isValidationRunning) {
+                navigator.sendBeacon('/api/stop');
+            }
+        });
     </script>
 </body>
 </html> 
