@@ -882,7 +882,7 @@ def gather_notion_data() -> List[Dict[str, Any]]:
 
     tech_valid_prop = None
     for prop_name in database_info.get("properties", {}):
-        if prop_name.lower().strip() == "technical validated":
+        if prop_name.lower().strip() == "To be Validated":
             tech_valid_prop = prop_name
             break
 
@@ -1140,6 +1140,22 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
         return str(XLSX_OUT.resolve())
 
 # ---------------------------------------------------------------------------
+# JSON Processing Helper
+# ---------------------------------------------------------------------------
+
+def replace_logical_operators(obj):
+    """Recursively replace || with OR and && with AND in JSON data."""
+    if isinstance(obj, dict):
+        return {key: replace_logical_operators(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_logical_operators(item) for item in obj]
+    elif isinstance(obj, str):
+        # Replace logical operators in string values
+        return obj.replace('||', ' OR ').replace('&&', ' AND ')
+    else:
+        return obj
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1195,8 +1211,11 @@ def main() -> None:
         else:
             comparison_text = "No data"
 
+        # Apply logical operator replacements to Notion JSON before pretty-printing
+        processed_notion_json = replace_logical_operators(notion_json) if notion_json else notion_json
+
         # Convert to pretty-printed JSON strings for Google Sheets (readable format)
-        notion_json_str = json.dumps(notion_json, ensure_ascii=False, indent=2)
+        notion_json_str = json.dumps(processed_notion_json, ensure_ascii=False, indent=2)
         erp_json_str = json.dumps(erp_json, ensure_ascii=False, indent=2)
         
         # Split large JSON strings to avoid 50k character limit
