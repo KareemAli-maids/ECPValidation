@@ -1265,9 +1265,9 @@ def main() -> None:
         logging.info("Process cancelled after ERP data fetch")
         return
 
-    # Build lookup by parameter name (case-insensitive)
-    notion_lookup = {rec["parameter"].lower(): rec for rec in notion_records if rec.get("parameter")}
-    erp_lookup = {rec["parameter"].lower(): rec for rec in erp_records if rec.get("parameter")}
+    # Build lookup by parameter name (case-insensitive and whitespace-trimmed)
+    notion_lookup = {rec["parameter"].lower().strip(): rec for rec in notion_records if rec.get("parameter")}
+    erp_lookup = {rec["parameter"].lower().strip(): rec for rec in erp_records if rec.get("parameter")}
 
     all_params = sorted(set(notion_lookup) | set(erp_lookup))
     logging.info("Total parameters: Notion=%d, ERP=%d, Combined=%d", len(notion_lookup), len(erp_lookup), len(all_params))
