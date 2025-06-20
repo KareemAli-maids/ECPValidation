@@ -666,70 +666,7 @@ class NotionDatabaseToCSV:
 
         return result
 
-    def _extract_nested_content_recursively(self, blocks: List[Dict[str, Any]], start_index: int, target_depth: int) -> str:
-        """Recursively extract all nested content under a condition, preserving structure and numbering."""
-        content_parts = []
-        i = start_index
-        numbered_counters = {}  # Track numbering per depth level
-        
-        while i < len(blocks) and blocks[i]["depth"] > target_depth:
-            block = blocks[i]
-            block_type = block.get("type", "")
-            block_depth = block.get("depth", 0)
-            block_text = block.get("text", "").strip()
-            
-            # Skip empty blocks
-            if not block_text:
-                i += 1
-                continue
-            
-            # Skip introductory blocks that contain "Value Below" or similar patterns
-            if self._is_introductory_block(block_text):
-                i += 1
-                continue
-            
-            # Calculate indentation based on depth relative to target
-            indent_level = block_depth - target_depth - 1
-            indent = "    " * indent_level  # 4 spaces per level
-            
-            # Handle different block types with appropriate formatting
-            if block_type == "bulleted_list_item":
-                content_parts.append(f"{indent}- {block_text}")
-            elif block_type == "numbered_list_item":
-                # Track numbering per depth level for proper sequential numbering
-                if block_depth not in numbered_counters:
-                    numbered_counters[block_depth] = 1
-                else:
-                    numbered_counters[block_depth] += 1
-                
-                number = numbered_counters[block_depth]
-                content_parts.append(f"{indent}{number}. {block_text}")
-            elif block_type == "paragraph":
-                content_parts.append(f"{indent}{block_text}")
-            elif block_type in ["heading_1", "heading_2", "heading_3"]:
-                # Add some emphasis for headings
-                content_parts.append(f"{indent}**{block_text}**")
-            elif block_type == "toggle":
-                content_parts.append(f"{indent}{block_text}")
-            elif block_type == "callout":
-                content_parts.append(f"{indent}💡 {block_text}")
-            elif block_type == "quote":
-                content_parts.append(f"{indent}> {block_text}")
-            elif block_type == "to_do":
-                # Check if it's completed (you might need to check block data for this)
-                content_parts.append(f"{indent}☐ {block_text}")
-            else:
-                # For any other block type, just add the text if it exists
-                content_parts.append(f"{indent}{block_text}")
-            
-            i += 1
-        
-        result = "\n".join(content_parts)
-        
-        # Clean up any remaining introductory prefixes that might have been missed
-        result = self._clean_introductory_prefixes(result)
-        
-        return result
+
     
     def _is_introductory_block(self, text: str) -> bool:
         """Check if a block is an introductory block that should be skipped."""
@@ -847,13 +784,26 @@ class NotionDatabaseToCSV:
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
                     
-                    # Use the new recursive function to extract all nested content
+                    # Simplified approach: collect all text from child blocks (much faster)
                     j = i + 1
-                    value_text = self._extract_nested_content_recursively(filtered_blocks, j, condition_depth)
-                    
-                    # Skip to the end of this condition's content
+                    values = []
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
+                        inner_blk = filtered_blocks[j]
+                        inner_text = inner_blk.get("text", "").strip()
+                        
+                        # Skip introductory blocks but include all content blocks
+                        if inner_text and not self._is_introductory_block(inner_text):
+                            # Add appropriate formatting based on block type
+                            block_type = inner_blk.get("type", "")
+                            if block_type == "bulleted_list_item":
+                                values.append(f"- {inner_text}")
+                            elif block_type == "numbered_list_item":
+                                values.append(f"1. {inner_text}")  # Simple numbering
+                            else:
+                                values.append(inner_text)
                         j += 1
+                    
+                    value_text = "\n".join(values) if values else ""
                     
                     conditional_logic.append({
                         "condition": condition_text,
@@ -868,13 +818,24 @@ class NotionDatabaseToCSV:
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
                     
-                    # Use the new recursive function to extract all nested content
+                    # Simplified approach for headings too
                     j = i + 1
-                    value_text = self._extract_nested_content_recursively(filtered_blocks, j, condition_depth)
-                    
-                    # Skip to the end of this condition's content
+                    values = []
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
+                        inner_blk = filtered_blocks[j]
+                        inner_text = inner_blk.get("text", "").strip()
+                        
+                        if inner_text and not self._is_introductory_block(inner_text):
+                            block_type = inner_blk.get("type", "")
+                            if block_type == "bulleted_list_item":
+                                values.append(f"- {inner_text}")
+                            elif block_type == "numbered_list_item":
+                                values.append(f"1. {inner_text}")
+                            else:
+                                values.append(inner_text)
                         j += 1
+                    
+                    value_text = "\n".join(values) if values else ""
                     
                     if value_text.strip():  # Only add if there's actual content
                         conditional_logic.append({
