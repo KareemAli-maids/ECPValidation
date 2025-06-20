@@ -622,142 +622,72 @@ class NotionDatabaseToCSV:
         dfs(page_id)
         return all_blocks
 
+    def _find_technical_ecp_block(self, start_block_id: str) -> Optional[dict]:
+        """Depth-first search for the first block whose plain text starts with 'Technical ECP'."""
 
+        def dfs(bid: str) -> Optional[dict]:
+            children = _fetch_all_children(bid)
+            for child in children:
+                text = _plain_text(child).strip()
+                if text.lower().startswith("technical ecp"):
+                    return child
+                if child.get("has_children"):
+                    found = dfs(child["id"])
+                    if found:
+                        return found
+            return None
+
+        return dfs(start_block_id)
 
     def extract_technical_ecp_only(self, page_id: str) -> List[Dict[str, Any]]:
-        """Efficient breadth-first search for Technical ECP with early termination."""
-        
-        # Breadth-first search with limited depth to find Technical ECP
-        ecp_block = None
-        blocks_to_search = [page_id]
-        searched_blocks = set()
-        max_search_depth = 3  # Limit search depth for performance
-        
-        for depth in range(max_search_depth):
-            if not blocks_to_search or ecp_block:
-                break
-                
-            next_level_blocks = []
-            
-            for block_id in blocks_to_search:
-                if block_id in searched_blocks:
-                    continue
-                searched_blocks.add(block_id)
-                
-                try:
-                    children = _fetch_all_children(block_id)
-                    for child in children:
-                        text = _plain_text(child).strip()
-                        if text.lower().startswith("technical ecp"):
-                            ecp_block = child
-                            break
-                        
-                        # Add to next level if it has children
-                        if child.get("has_children"):
-                            next_level_blocks.append(child["id"])
-                    
-                    if ecp_block:
-                        break
-                        
-                except Exception as e:
-                    log.warning("Failed to fetch children for block %s: %s", block_id[:8], e)
-                    continue
-            
-            blocks_to_search = next_level_blocks
-        
-        if not ecp_block:
-            log.debug("No Technical ECP block found in page %s", page_id[:8])
+        """Locate the 'Technical ECP' block and return that block and all of its descendants."""
+
+        target_block = self._find_technical_ecp_block(page_id)
+        if not target_block:
             return []
-        
-        # Found it! Now get its descendants efficiently
-        result = []
-        
-        # Add the ECP block itself
-        metadata = _extract_block_metadata(ecp_block)
-        content = _extract_block_content(ecp_block, self.notion)
+
+        result: List[Dict[str, Any]] = []
+
+        metadata = _extract_block_metadata(target_block)
+        content = _extract_block_content(target_block, self.notion)
         result.append({
             **metadata,
             **content,
             "depth": 0,
-            "full_block_json": ""
+            "full_block_json": "" if not log.isEnabledFor(logging.DEBUG) else json.dumps(target_block, indent=2, ensure_ascii=False)
         })
-        
-        # Get all descendants using the fast algorithm
-        if ecp_block.get("has_children"):
-            try:
-                # Use the existing fast algorithm for descendants
-                descendant_blocks = self.extract_all_blocks_using_working_algorithm(ecp_block["id"])
-                for blk in descendant_blocks:
-                    blk["depth"] += 1  # Adjust depth
-                    blk["full_block_json"] = ""  # Clean up for performance
-                result.extend(descendant_blocks)
-            except Exception as e:
-                log.warning("Failed to fetch ECP descendants: %s", e)
-        
+
+        descendant_blocks = self.extract_all_blocks_using_working_algorithm(target_block["id"])
+        for blk in descendant_blocks:
+            blk["depth"] += 1
+            if not log.isEnabledFor(logging.DEBUG):
+                blk["full_block_json"] = ""
+        result.extend(descendant_blocks)
+
         return result
 
-
-    
-    def _is_introductory_block(self, text: str) -> bool:
-        """Check if a block is an introductory block that should be skipped."""
-        text_lower = text.lower().strip()
-        
-        # Common introductory patterns to skip
-        skip_patterns = [
-            "value below",
-            "values below",
-            "content below",
-            "see below",
-            "below",
-            "🔻",
-            "⬇️",
-            "↓"
-        ]
-        
-        for pattern in skip_patterns:
-            if pattern in text_lower:
-                return True
-        
-        # Skip very short blocks that are likely just indicators
-        if len(text.strip()) <= 3 and not text.strip().isalnum():
-            return True
-        
-        return False
-    
-    def _clean_introductory_prefixes(self, text: str) -> str:
-        """Clean up any remaining introductory prefixes from the extracted text."""
+    def _clean_value_text(self, text: str) -> str:
+        """Clean up introductory prefixes and common noise from extracted text."""
         if not text:
             return text
         
-        lines = text.split('\n')
-        cleaned_lines = []
+        # Remove common prefixes
+        prefixes_to_remove = [
+            "> Value Below 🔻",
+            "Value Below 🔻", 
+            "> Value Below",
+            "Value Below",
+            "🔻",
+            "> 🔻"
+        ]
         
-        for line in lines:
-            # Remove lines that are just introductory indicators
-            if self._is_introductory_block(line.strip()):
-                continue
-            
-            # Clean up common prefixes within lines
-            cleaned_line = line
-            prefixes_to_remove = [
-                "> Value Below 🔻",
-                "Value Below 🔻",
-                "> Value Below",
-                "Value Below",
-                "🔻",
-                "> 🔻"
-            ]
-            
-            for prefix in prefixes_to_remove:
-                if cleaned_line.strip().startswith(prefix):
-                    # Remove the prefix and any following whitespace/newlines
-                    cleaned_line = cleaned_line.replace(prefix, "", 1).lstrip()
-                    break
-            
-            if cleaned_line.strip():  # Only add non-empty lines
-                cleaned_lines.append(cleaned_line)
+        cleaned = text
+        for prefix in prefixes_to_remove:
+            if cleaned.strip().startswith(prefix):
+                cleaned = cleaned.replace(prefix, "", 1).lstrip()
+                break
         
-        return '\n'.join(cleaned_lines)
+        return cleaned.strip()
 
     def _process_page(self, page_index: int, total_pages: int, page: dict) -> Optional[Dict[str, Any]]:
         """Process a single Notion page and return structured data."""
@@ -814,64 +744,24 @@ class NotionDatabaseToCSV:
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
                     
-                    # Simplified approach: collect all text from child blocks (much faster)
+                    # Use original fast algorithm - collect all nested text
                     j = i + 1
                     values = []
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
                         inner_blk = filtered_blocks[j]
                         inner_text = inner_blk.get("text", "").strip()
-                        
-                        # Skip introductory blocks but include all content blocks
-                        if inner_text and not self._is_introductory_block(inner_text):
-                            # Add appropriate formatting based on block type
-                            block_type = inner_blk.get("type", "")
-                            if block_type == "bulleted_list_item":
-                                values.append(f"- {inner_text}")
-                            elif block_type == "numbered_list_item":
-                                values.append(f"1. {inner_text}")  # Simple numbering
-                            else:
-                                values.append(inner_text)
+                        if inner_text:  # Include any non-empty text (not just bulleted_list_item)
+                            values.append(inner_text)
                         j += 1
                     
-                    value_text = "\n".join(values) if values else ""
+                    # Join all values and clean up
+                    value_text = " ".join(values)
+                    value_text = self._clean_value_text(value_text)
                     
                     conditional_logic.append({
                         "condition": condition_text,
                         "value": value_text
                     })
-                    i = j - 1
-                
-                # Also handle cases where condition content is directly under headings or other blocks
-                elif btype in ["heading_1", "heading_2", "heading_3"] and "condition" in text.lower():
-                    condition_depth = blk.get("depth", 0)
-                    condition_text = text.strip()
-                    if condition_text.lower().startswith("condition "):
-                        condition_text = condition_text[10:].strip()
-                    
-                    # Simplified approach for headings too
-                    j = i + 1
-                    values = []
-                    while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
-                        inner_blk = filtered_blocks[j]
-                        inner_text = inner_blk.get("text", "").strip()
-                        
-                        if inner_text and not self._is_introductory_block(inner_text):
-                            block_type = inner_blk.get("type", "")
-                            if block_type == "bulleted_list_item":
-                                values.append(f"- {inner_text}")
-                            elif block_type == "numbered_list_item":
-                                values.append(f"1. {inner_text}")
-                            else:
-                                values.append(inner_text)
-                        j += 1
-                    
-                    value_text = "\n".join(values) if values else ""
-                    
-                    if value_text.strip():  # Only add if there's actual content
-                        conditional_logic.append({
-                            "condition": condition_text,
-                            "value": value_text
-                        })
                     i = j - 1
                 
                 i += 1
