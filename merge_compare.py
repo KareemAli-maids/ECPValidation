@@ -1222,10 +1222,14 @@ def replace_logical_operators(obj):
 def has_uppercase_booleans(json_str: str) -> bool:
     """Check if JSON string contains uppercase boolean values (True, False, TRUE, FALSE, etc.)."""
     import re
-    # Look for boolean patterns that are not lowercase
-    # This regex matches True, False, TRUE, FALSE but not true, false
-    uppercase_boolean_pattern = r'\b(?:True|False|TRUE|FALSE)\b'
-    return bool(re.search(uppercase_boolean_pattern, json_str))
+    # Only match booleans with uppercase letters - specifically exclude lowercase true/false
+    # Match True, False, TRUE, FALSE but NOT true, false
+    return bool(
+        re.search(r'\bTrue\b', json_str) or      # Match "True" (capital T)
+        re.search(r'\bFalse\b', json_str) or     # Match "False" (capital F)  
+        re.search(r'\bTRUE\b', json_str) or      # Match "TRUE" (all caps)
+        re.search(r'\bFALSE\b', json_str)        # Match "FALSE" (all caps)
+    )
 
 def normalize_boolean_case(json_str: str) -> str:
     """Convert all boolean values in JSON string to lowercase."""
