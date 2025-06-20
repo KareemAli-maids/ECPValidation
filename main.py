@@ -210,9 +210,9 @@ async def compare_data(request: ComparisonRequest):
             # Use Claude for comparison since both exist (with original complete data)
             cmp_text = compare_with_claude(n_json, e_json)
 
-            # Convert to compact JSON strings to save space
-            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
-            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
+            # Convert to pretty-printed JSON strings for readability
+            notion_json_str = json.dumps(n_json, ensure_ascii=False, indent=2)
+            erp_json_str = json.dumps(e_json, ensure_ascii=False, indent=2)
             
             # Split large JSON strings to avoid 50k character limit
             notion_chunks = split_large_text(notion_json_str)
@@ -263,8 +263,8 @@ async def compare_data(request: ComparisonRequest):
         for param in erp_only_params:
             e_json = erp_lookup[param]
             
-            # Convert to compact JSON and split if needed
-            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
+            # Convert to pretty-printed JSON and split if needed
+            erp_json_str = json.dumps(e_json, ensure_ascii=False, indent=2)
             erp_chunks = split_large_text(erp_json_str)
             
             # Create rows for ERP-only parameter
@@ -296,8 +296,8 @@ async def compare_data(request: ComparisonRequest):
         for param in notion_only_params:
             n_json = notion_lookup[param]
             
-            # Convert to compact JSON and split if needed
-            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
+            # Convert to pretty-printed JSON and split if needed
+            notion_json_str = json.dumps(n_json, ensure_ascii=False, indent=2)
             notion_chunks = split_large_text(notion_json_str)
             
             # Create rows for Notion-only parameter

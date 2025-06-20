@@ -1099,9 +1099,9 @@ def main() -> None:
         else:
             comparison_text = "No data"
 
-        # Convert to compact JSON strings for Google Sheets (no indentation to save space)
-        notion_json_str = json.dumps(notion_json, ensure_ascii=False, separators=(',', ':'))
-        erp_json_str = json.dumps(erp_json, ensure_ascii=False, separators=(',', ':'))
+        # Convert to pretty-printed JSON strings for Google Sheets (readable format)
+        notion_json_str = json.dumps(notion_json, ensure_ascii=False, indent=2)
+        erp_json_str = json.dumps(erp_json, ensure_ascii=False, indent=2)
         
         # Split large JSON strings to avoid 50k character limit
         notion_chunks = split_large_text(notion_json_str)
