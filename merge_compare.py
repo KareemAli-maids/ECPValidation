@@ -142,25 +142,18 @@ COMPARISON_PROMPT = (
     "- Missing conditional branches that change business logic outcomes\n"
     "- Additional conditional branches that change business logic outcomes\n  "
     "- Different comparison values that alter system behavior\n"
-    "- Missing conditions that would cause incorrect routing or processing\n"
-    "- **BOOLEAN CASE SENSITIVITY**: Any boolean values that are not lowercase 'true' or 'false' (e.g., 'True', 'TRUE', 'False', 'FALSE')\n\n"
+    "- Missing conditions that would cause incorrect routing or processing\n\n"
     "IGNORE:\n"
     "- Bracket types, escape characters, JSON formatting / ordering\n"
     "- Prompt names, variable naming, condition order when logically equivalent\n"
     "- Empty or trivial 'else' conditions in ERP JSON (conditions with empty values, just dots '.', or whitespace)\n"
     "- Additional 'else' conditions in ERP JSON that contain no meaningful content\n\n"
-    "## BOOLEAN VALUE REQUIREMENTS:\n"
-    "**CRITICAL**: ALL boolean values in conditions MUST be lowercase 'true' or 'false'. "
-    "Any boolean value with uppercase letters (True, TRUE, False, FALSE, etc.) is a FUNCTIONAL ERROR that MUST be flagged. "
-    "This applies to both Notion and ERP JSON configurations.\n\n"
     "## SPECIAL HANDLING FOR ERP 'ELSE' CONDITIONS:\n"
     "The ERP system automatically includes 'else' conditions even when they are empty or contain only trivial content like '.' or whitespace. "
     "Do NOT flag these as differences unless they contain actual meaningful logic or values that would change system behavior.\n\n"
     "RULES:\n"
-    "1. ALWAYS check for incorrect boolean casing in ANY condition - this is a mandatory check\n"
-    "2. If no functional issues exist AND all booleans are properly lowercase, reply exactly: 'No significant functional differences found.'\n"
-    "3. Otherwise, list each issue as a bullet starting with * .\n"
-    "4. For boolean casing issues, use format: '* Boolean casing error: Found [incorrect_value] instead of [correct_value] in [location]'\n\n"
+    "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
+    "2. Otherwise, list each issue as a bullet starting with * .\n\n"
     "## COMPARISON TASK\n"
     "Compare these two JSON configurations and identify ONLY semantic differences that affect functionality:\n\n"
     "NOTION JSON (Reference):\n```json\n{{NOTION_JSON}}\n```\n\n"
@@ -1058,7 +1051,7 @@ def split_large_text(text: str, max_chars: int = 45000) -> List[str]:
     
     return chunks
 
-def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None) -> str:
+def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None, red_highlight_cells: List[tuple] = None) -> str:
     """Create a Google Sheet with comparison data and share it with anyone who has the link."""
     try:
         # Set up credentials and authorize
@@ -1164,6 +1157,23 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                 })
                 print(f"✅ Applied red formatting to section header at row {actual_row}")
         
+        # Format cells with uppercase booleans (red highlighting)
+        if red_highlight_cells:
+            print(f"Highlighting {len(red_highlight_cells)} cells with uppercase booleans...")
+            for row_idx, col_idx in red_highlight_cells:
+                actual_row = row_idx + 2  # +2 because we start after main header row
+                col_letter = ['A', 'B', 'C', 'D'][col_idx]  # Convert column index to letter
+                cell_range = f'{col_letter}{actual_row}'
+                
+                try:
+                    worksheet.format(cell_range, {
+                        'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8},  # Light red background
+                        'textFormat': {'bold': True}  # Bold text for emphasis
+                    })
+                    print(f"✅ Highlighted cell {cell_range} for uppercase boolean")
+                except Exception as highlight_error:
+                    print(f"⚠️ Could not highlight cell {cell_range}: {highlight_error}")
+        
         # Share with anyone who has the link (instead of domain restriction)
         print("Attempting to share with anyone who has the link...")
         try:
@@ -1208,6 +1218,25 @@ def replace_logical_operators(obj):
         return obj.replace('||', ' OR ').replace('&&', ' AND ')
     else:
         return obj
+
+def has_uppercase_booleans(json_str: str) -> bool:
+    """Check if JSON string contains uppercase boolean values (True, False, TRUE, FALSE, etc.)."""
+    import re
+    # Look for boolean patterns that are not lowercase
+    # This regex matches True, False, TRUE, FALSE but not true, false
+    uppercase_boolean_pattern = r'\b(?:True|False|TRUE|FALSE)\b'
+    return bool(re.search(uppercase_boolean_pattern, json_str))
+
+def normalize_boolean_case(json_str: str) -> str:
+    """Convert all boolean values in JSON string to lowercase."""
+    import re
+    # Replace all variations of True/False with lowercase versions
+    # Use word boundaries to avoid replacing parts of other words
+    json_str = re.sub(r'\bTrue\b', 'true', json_str)
+    json_str = re.sub(r'\bFalse\b', 'false', json_str)
+    json_str = re.sub(r'\bTRUE\b', 'true', json_str)
+    json_str = re.sub(r'\bFALSE\b', 'false', json_str)
+    return json_str
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1266,6 +1295,7 @@ def main() -> None:
     # Prepare data rows for Google Sheets
     data_rows = []
     section_headers = []  # Track section header row indices
+    red_highlight_cells = []  # Track cells that need red highlighting due to uppercase booleans
     
     def add_parameter_rows(param: str, notion_json: dict, erp_json: dict, comparison_text: str):
         """Helper function to add parameter rows with proper formatting"""
@@ -1276,6 +1306,14 @@ def main() -> None:
         notion_json_str = json.dumps(processed_notion_json, ensure_ascii=False, indent=2)
         erp_json_str = json.dumps(erp_json, ensure_ascii=False, indent=2)
         
+        # Check for uppercase booleans and normalize them
+        notion_has_uppercase = has_uppercase_booleans(notion_json_str)
+        erp_has_uppercase = has_uppercase_booleans(erp_json_str)
+        
+        # Normalize boolean case
+        notion_json_str = normalize_boolean_case(notion_json_str)
+        erp_json_str = normalize_boolean_case(erp_json_str)
+        
         # Split large JSON strings to avoid 50k character limit
         notion_chunks = split_large_text(notion_json_str)
         erp_chunks = split_large_text(erp_json_str)
@@ -1285,6 +1323,8 @@ def main() -> None:
         
         # Create rows - first row has parameter name and comparison, subsequent rows are continuations
         for j in range(max_chunks):
+            current_row_index = len(data_rows)
+            
             if j == 0:
                 # First row: include parameter name and comparison
                 row = [
@@ -1293,6 +1333,12 @@ def main() -> None:
                     erp_chunks[j] if j < len(erp_chunks) else "",
                     comparison_text
                 ]
+                
+                # Track cells that need red highlighting (only for first row with main content)
+                if notion_has_uppercase and notion_chunks[j]:
+                    red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
+                if erp_has_uppercase and erp_chunks[j]:
+                    red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
             else:
                 # Continuation rows: empty parameter name and comparison
                 row = [
@@ -1301,6 +1347,12 @@ def main() -> None:
                     erp_chunks[j] if j < len(erp_chunks) else "",
                     ""  # Empty comparison for continuation rows
                 ]
+                
+                # Track cells that need red highlighting for continuation rows too
+                if notion_has_uppercase and notion_chunks[j]:
+                    red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
+                if erp_has_uppercase and erp_chunks[j]:
+                    red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
             
             data_rows.append(row)
     
@@ -1351,7 +1403,7 @@ def main() -> None:
         return
 
     # Create shared Google Sheet
-    sheet_url = create_shared_google_sheet(data_rows, section_headers)
+    sheet_url = create_shared_google_sheet(data_rows, section_headers, red_highlight_cells)
     logging.info("🎉 Comparison complete! Sheet URL: %s", sheet_url)
 
 
