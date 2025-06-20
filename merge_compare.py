@@ -711,6 +711,11 @@ def gather_erp_data() -> List[Dict[str, Any]]:
     """
     logging.info("Fetching ERP data for prompt '%s' (multithreaded)", PROMPT_NAME)
 
+    # Early cancellation check before starting
+    if cancel_event and cancel_event.is_set():
+        logging.info("ERP data gathering cancelled before starting")
+        return []
+
     ids = fetch_ids()
     if not ids:
         logging.warning("No ERP IDs found – returning empty list")
@@ -730,6 +735,15 @@ def gather_erp_data() -> List[Dict[str, Any]]:
 
         # As each future completes, convert and append
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(ids), desc="ERP records"):
+            # Check cancellation more frequently
+            if cancel_event and cancel_event.is_set():
+                logging.info("ERP data gathering cancelled, shutting down thread pool...")
+                # Cancel remaining futures
+                for remaining_future in futures:
+                    remaining_future.cancel()
+                executor.shutdown(wait=False)
+                break
+                
             ident = futures[future]
             try:
                 raw = future.result()
@@ -744,9 +758,6 @@ def gather_erp_data() -> List[Dict[str, Any]]:
                         progress_pct = 70 + int((completed_count / len(ids)) * 10)  # 70-80%
                         progress_callback("Fetching ERP data", progress_pct, f"Retrieved {completed_count}/{len(ids)} ERP records")
                     
-                # Stop early if cancellation requested
-                if cancel_event and cancel_event.is_set():
-                    break
             except Exception as e:
                 logging.error("Failed to fetch ERP ID %s: %s", ident, e)
                 # Still increment completed count for failed records to maintain progress accuracy
@@ -762,6 +773,12 @@ def gather_erp_data() -> List[Dict[str, Any]]:
 
 def gather_notion_data() -> List[Dict[str, Any]]:
     logging.info("Fetching Notion data from database %s", DATABASE_URL)
+    
+    # Early cancellation check before starting
+    if cancel_event and cancel_event.is_set():
+        logging.info("Notion data gathering cancelled before starting")
+        return []
+        
     processor = NotionDatabaseToCSV(NOTION_TOKEN)
 
     database_id = processor.extract_database_id_from_url(DATABASE_URL)
@@ -792,6 +809,11 @@ def gather_notion_data() -> List[Dict[str, Any]]:
     has_more = True
     cursor = None
     while has_more:
+        # Check cancellation during page fetching
+        if cancel_event and cancel_event.is_set():
+            logging.info("Notion page fetching cancelled")
+            return []
+            
         query_kwargs: Dict[str, Any] = {"database_id": database_id, "page_size": 100}
         if filter_payload:
             query_kwargs["filter"] = filter_payload
@@ -817,6 +839,15 @@ def gather_notion_data() -> List[Dict[str, Any]]:
         
         # Collect results as they complete
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(pages), desc="Notion pages"):
+            # Check cancellation more frequently
+            if cancel_event and cancel_event.is_set():
+                logging.info("Notion data processing cancelled, shutting down thread pool...")
+                # Cancel remaining futures
+                for remaining_future in futures:
+                    remaining_future.cancel()
+                executor.shutdown(wait=False)
+                break
+                
             idx, page = futures[future]
             try:
                 obj = future.result()
@@ -834,9 +865,6 @@ def gather_notion_data() -> List[Dict[str, Any]]:
                 # Small delay to be respectful of API rate limits
                 time.sleep(0.1)
                     
-                # Early exit on cancellation
-                if cancel_event and cancel_event.is_set():
-                    break
             except Exception as e:
                 page_id = page.get("id", "unknown")
                 logging.error("Failed to process Notion page %s (index %d): %s", page_id, idx, e)
@@ -1022,9 +1050,25 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
 
+    # Early cancellation check
+    if cancel_event and cancel_event.is_set():
+        logging.info("Main function cancelled before starting")
+        return
+
     # Fetch from both sources
     notion_records = gather_notion_data()
+    
+    # Check cancellation after Notion data
+    if cancel_event and cancel_event.is_set():
+        logging.info("Process cancelled after Notion data fetch")
+        return
+        
     erp_records = gather_erp_data()
+    
+    # Check cancellation after ERP data
+    if cancel_event and cancel_event.is_set():
+        logging.info("Process cancelled after ERP data fetch")
+        return
 
     # Build lookup by parameter name (case-insensitive)
     notion_lookup = {rec["parameter"].lower(): rec for rec in notion_records if rec.get("parameter")}
@@ -1036,7 +1080,12 @@ def main() -> None:
     # Prepare data rows for Google Sheets
     data_rows = []
 
-    for param in tqdm(all_params, desc="Comparing"):
+    for i, param in enumerate(tqdm(all_params, desc="Comparing")):
+        # Check cancellation during comparison loop
+        if cancel_event and cancel_event.is_set():
+            logging.info("Process cancelled during parameter comparison at %d/%d", i, len(all_params))
+            return
+            
         notion_json = notion_lookup.get(param, {})
         erp_json = erp_lookup.get(param, {})
         
@@ -1062,25 +1111,30 @@ def main() -> None:
         max_chunks = max(len(notion_chunks), len(erp_chunks))
         
         # Create rows - first row has parameter name and comparison, subsequent rows are continuations
-        for i in range(max_chunks):
-            if i == 0:
+        for j in range(max_chunks):
+            if j == 0:
                 # First row: include parameter name and comparison
                 row = [
                     param,
-                    notion_chunks[i] if i < len(notion_chunks) else "",
-                    erp_chunks[i] if i < len(erp_chunks) else "",
+                    notion_chunks[j] if j < len(notion_chunks) else "",
+                    erp_chunks[j] if j < len(erp_chunks) else "",
                     comparison_text
                 ]
             else:
                 # Continuation rows: empty parameter name and comparison
                 row = [
                     f"  └─ {param} (cont.)",  # Indented continuation indicator
-                    notion_chunks[i] if i < len(notion_chunks) else "",
-                    erp_chunks[i] if i < len(erp_chunks) else "",
+                    notion_chunks[j] if j < len(notion_chunks) else "",
+                    erp_chunks[j] if j < len(erp_chunks) else "",
                     ""  # Empty comparison for continuation rows
                 ]
             
             data_rows.append(row)
+
+    # Final cancellation check before creating sheet
+    if cancel_event and cancel_event.is_set():
+        logging.info("Process cancelled before creating Google Sheet")
+        return
 
     # Create shared Google Sheet
     sheet_url = create_shared_google_sheet(data_rows)
