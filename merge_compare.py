@@ -1157,74 +1157,123 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                 })
                 print(f"✅ Applied red formatting to section header at row {actual_row}")
         
-        # Add data validation and conditional formatting for boolean error columns
-        print("Setting up dropdown validation and conditional formatting for boolean error columns...")
+        # Add data validation with red/green dropdowns for boolean error columns
+        print("Setting up red/green dropdown validation for boolean error columns...")
         
-        # Add data validation for columns E and F (Boolean Error columns)
         end_row = len(data_rows) + 1  # +1 for header
         
-        # Column E: Notion Boolean Error
-        try:
-            worksheet.add_validation(f'E2:E{end_row}', {
-                'condition': {
-                    'type': 'ONE_OF_LIST',
-                    'values': [
-                        {'userEnteredValue': 'Yes'},
-                        {'userEnteredValue': 'No'}
-                    ]
-                },
-                'strict': True,
-                'showCustomUi': True
-            })
-            print("✅ Added dropdown validation for Notion Boolean Error column")
-        except Exception as e:
-            print(f"⚠️ Could not add validation for column E: {e}")
+        # Use batch update to set up data validation and conditional formatting
+        validation_requests = []
         
-        # Column F: ERP Boolean Error  
-        try:
-            worksheet.add_validation(f'F2:F{end_row}', {
-                'condition': {
-                    'type': 'ONE_OF_LIST',
-                    'values': [
-                        {'userEnteredValue': 'Yes'},
-                        {'userEnteredValue': 'No'}
-                    ]
+        # Data validation for Column E: Notion Boolean Error
+        validation_requests.append({
+            "setDataValidation": {
+                "range": {
+                    "sheetId": worksheet._properties["sheetId"],
+                    "startRowIndex": 1,  # Start from row 2 (0-indexed)
+                    "endRowIndex": end_row,
+                    "startColumnIndex": 4,  # Column E (0-indexed)
+                    "endColumnIndex": 5
                 },
-                'strict': True,
-                'showCustomUi': True
-            })
-            print("✅ Added dropdown validation for ERP Boolean Error column")
-        except Exception as e:
-            print(f"⚠️ Could not add validation for column F: {e}")
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": "🔴 Yes"},
+                            {"userEnteredValue": "🟢 No"}
+                        ]
+                    },
+                    "strict": True,
+                    "showCustomUi": True
+                }
+            }
+        })
         
-        # Add conditional formatting - Red background for "Yes", Green background for "No"
+        # Data validation for Column F: ERP Boolean Error
+        validation_requests.append({
+            "setDataValidation": {
+                "range": {
+                    "sheetId": worksheet._properties["sheetId"],
+                    "startRowIndex": 1,  # Start from row 2 (0-indexed)
+                    "endRowIndex": end_row,
+                    "startColumnIndex": 5,  # Column F (0-indexed)
+                    "endColumnIndex": 6
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": "🔴 Yes"},
+                            {"userEnteredValue": "🟢 No"}
+                        ]
+                    },
+                    "strict": True,
+                    "showCustomUi": True
+                }
+            }
+        })
+        
+        # Conditional formatting for red "Yes" values
+        validation_requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [
+                        {
+                            "sheetId": worksheet._properties["sheetId"],
+                            "startRowIndex": 1,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 4,
+                            "endColumnIndex": 6
+                        }
+                    ],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "TEXT_CONTAINS",
+                            "values": [{"userEnteredValue": "🔴 Yes"}]
+                        },
+                        "format": {
+                            "backgroundColor": {"red": 0.95, "green": 0.6, "blue": 0.6},
+                            "textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0.0, "blue": 0.0}}
+                        }
+                    }
+                },
+                "index": 0
+            }
+        })
+        
+        # Conditional formatting for green "No" values
+        validation_requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [
+                        {
+                            "sheetId": worksheet._properties["sheetId"],
+                            "startRowIndex": 1,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 4,
+                            "endColumnIndex": 6
+                        }
+                    ],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "TEXT_CONTAINS",
+                            "values": [{"userEnteredValue": "🟢 No"}]
+                        },
+                        "format": {
+                            "backgroundColor": {"red": 0.6, "green": 0.95, "blue": 0.6},
+                            "textFormat": {"bold": True, "foregroundColor": {"red": 0.0, "green": 0.6, "blue": 0.0}}
+                        }
+                    }
+                },
+                "index": 1
+            }
+        })
+        
         try:
-            # Red formatting for "Yes" values in both columns
-            worksheet.add_conditional_formatting(f'E2:F{end_row}', {
-                'condition': {
-                    'type': 'TEXT_EQ',
-                    'values': [{'userEnteredValue': 'Yes'}]
-                },
-                'format': {
-                    'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8},  # Light red
-                    'textFormat': {'bold': True}
-                }
-            })
-            
-            # Green formatting for "No" values in both columns
-            worksheet.add_conditional_formatting(f'E2:F{end_row}', {
-                'condition': {
-                    'type': 'TEXT_EQ',
-                    'values': [{'userEnteredValue': 'No'}]
-                },
-                'format': {
-                    'backgroundColor': {'red': 0.8, 'green': 1.0, 'blue': 0.8},  # Light green
-                    'textFormat': {'bold': True}
-                }
-            })
-            print("✅ Added conditional formatting for boolean error columns")
+            worksheet.spreadsheet.batch_update({"requests": validation_requests})
+            print("✅ Added red/green dropdown validation and conditional formatting")
         except Exception as e:
-            print(f"⚠️ Could not add conditional formatting: {e}")
+            print(f"⚠️ Could not add dropdown validation: {e}")
         
         # Share with anyone who has the link (instead of domain restriction)
         print("Attempting to share with anyone who has the link...")
@@ -1273,15 +1322,30 @@ def replace_logical_operators(obj):
 
 def has_uppercase_booleans(json_str: str) -> bool:
     """Check if JSON string contains uppercase boolean values (True, False, TRUE, FALSE, etc.)."""
+    if not json_str:
+        return False
+        
     import re
-    # Only match booleans with uppercase letters - specifically exclude lowercase true/false
-    # Match True, False, TRUE, FALSE but NOT true, false
-    return bool(
-        re.search(r'\bTrue\b', json_str) or      # Match "True" (capital T)
-        re.search(r'\bFalse\b', json_str) or     # Match "False" (capital F)  
-        re.search(r'\bTRUE\b', json_str) or      # Match "TRUE" (all caps)
-        re.search(r'\bFALSE\b', json_str)        # Match "FALSE" (all caps)
-    )
+    
+    # Simply check for the presence of uppercase boolean patterns
+    # We need to be very specific to avoid false positives
+    patterns = [
+        r':\s*True\b',    # ": True" (JSON value True)
+        r':\s*False\b',   # ": False" (JSON value False)  
+        r':\s*TRUE\b',    # ": TRUE" (JSON value TRUE)
+        r':\s*FALSE\b',   # ": FALSE" (JSON value FALSE)
+        r'=\s*True\b',    # "= True" (assignment True)
+        r'=\s*False\b',   # "= False" (assignment False)
+        r'=\s*TRUE\b',    # "= TRUE" (assignment TRUE)
+        r'=\s*FALSE\b',   # "= FALSE" (assignment FALSE)
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, json_str):
+            print(f"DEBUG: Found uppercase boolean pattern: {pattern} in {json_str[:100]}...")
+            return True
+    
+    return False
 
 def normalize_boolean_case(json_str: str) -> str:
     """Convert all boolean values in JSON string to lowercase."""
@@ -1380,24 +1444,24 @@ def main() -> None:
         for j in range(max_chunks):
             if j == 0:
                 # First row: include parameter name, comparison, and boolean error indicators
-                row = [
-                    param,
-                    notion_chunks[j] if j < len(notion_chunks) else "",
-                    erp_chunks[j] if j < len(erp_chunks) else "",
-                    comparison_text,
-                    "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error
-                    "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
-                ]
+                                    row = [
+                        param,
+                        notion_chunks[j] if j < len(notion_chunks) else "",
+                        erp_chunks[j] if j < len(erp_chunks) else "",
+                        comparison_text,
+                        "🔴 Yes" if notion_has_uppercase and notion_chunks[j] else "🟢 No",  # Notion Boolean Error
+                        "🔴 Yes" if erp_has_uppercase and erp_chunks[j] else "🟢 No"        # ERP Boolean Error
+                    ]
             else:
                 # Continuation rows: empty parameter name and comparison, but keep boolean indicators
-                row = [
-                    f"  └─ {param} (cont.)",  # Indented continuation indicator
-                    notion_chunks[j] if j < len(notion_chunks) else "",
-                    erp_chunks[j] if j < len(erp_chunks) else "",
-                    "",  # Empty comparison for continuation rows
-                    "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error  
-                    "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
-                ]
+                                    row = [
+                        f"  └─ {param} (cont.)",  # Indented continuation indicator
+                        notion_chunks[j] if j < len(notion_chunks) else "",
+                        erp_chunks[j] if j < len(erp_chunks) else "",
+                        "",  # Empty comparison for continuation rows
+                        "🔴 Yes" if notion_has_uppercase and notion_chunks[j] else "🟢 No",  # Notion Boolean Error  
+                        "🔴 Yes" if erp_has_uppercase and erp_chunks[j] else "🟢 No"        # ERP Boolean Error
+                    ]
             
             data_rows.append(row)
     

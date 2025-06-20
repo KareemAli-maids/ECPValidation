@@ -238,8 +238,8 @@ async def compare_data(request: ComparisonRequest):
                         notion_chunks[j] if j < len(notion_chunks) else "",
                         erp_chunks[j] if j < len(erp_chunks) else "",
                         comparison_text,
-                        "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error
-                        "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
+                        "🔴 Yes" if notion_has_uppercase and notion_chunks[j] else "🟢 No",  # Notion Boolean Error
+                        "🔴 Yes" if erp_has_uppercase and erp_chunks[j] else "🟢 No"        # ERP Boolean Error
                     ]
                 else:
                     # Continuation rows: empty parameter name and comparison, but keep boolean indicators
@@ -248,8 +248,8 @@ async def compare_data(request: ComparisonRequest):
                         notion_chunks[j] if j < len(notion_chunks) else "",
                         erp_chunks[j] if j < len(erp_chunks) else "",
                         "",  # Empty comparison for continuation rows
-                        "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error  
-                        "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
+                        "🔴 Yes" if notion_has_uppercase and notion_chunks[j] else "🟢 No",  # Notion Boolean Error  
+                        "🔴 Yes" if erp_has_uppercase and erp_chunks[j] else "🟢 No"        # ERP Boolean Error
                     ]
                 
                 data_rows.append(row)
