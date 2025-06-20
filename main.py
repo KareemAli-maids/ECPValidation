@@ -18,7 +18,7 @@ from datetime import datetime
 import threading
 
 # Import our comparison logic
-from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet, truncate_cell_content
+from merge_compare import gather_erp_data, gather_notion_data, compare_with_claude, create_shared_google_sheet
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -97,13 +97,13 @@ async def compare_data(request: ComparisonRequest):
     guarantees that the UI can receive real-time updates while the comparison
     is still running.
     """
-
+    
     # ---------------------------------------------------------------
     # 1. Validate request payload early – run on event-loop thread
     # ---------------------------------------------------------------
     if not request.page_id and not request.prompt_name:
         raise HTTPException(
-            status_code=400,
+            status_code=400, 
             detail="At least one data source must be provided (page_id or prompt_name)",
         )
 
@@ -115,7 +115,7 @@ async def compare_data(request: ComparisonRequest):
 
         logger.info("Starting comparison process…")
         start_time = time.time()
-
+        
         # Dynamically update merge_compare globals (safe inside the worker thread)
         import merge_compare as mc
         if prompt_name:
@@ -126,7 +126,7 @@ async def compare_data(request: ComparisonRequest):
                 page_id.split("/")[-1].split("?")[0] if "notion.so" in page_id else page_id
             )
             mc.DATABASE_URL = f"https://www.notion.so/{nid}"
-
+        
         # Reset + initialise progress
         reset_progress()
         update_progress("Initializing validation process", 2, "Starting ECP validation…")
@@ -152,7 +152,7 @@ async def compare_data(request: ComparisonRequest):
                 )
             except Exception as exc:
                 logger.warning("Notion fetch failed: %s", exc)
-
+        
         # -------------------------------------------------------
         # 2.b Fetch ERP data
         # -------------------------------------------------------
@@ -168,13 +168,13 @@ async def compare_data(request: ComparisonRequest):
                 )
             except Exception as exc:
                 logger.warning("ERP fetch failed: %s", exc)
-
+        
         if not notion_records and not erp_records:
             return ComparisonResponse(
                 success=False,
                 message="No data found from either source. Please check your inputs and try again.",
             )
-
+        
         # -------------------------------------------------------
         # 2.c Run Claude analysis & build comparison rows
         # -------------------------------------------------------
@@ -210,16 +210,12 @@ async def compare_data(request: ComparisonRequest):
             # Use Claude for comparison since both exist
             cmp_text = compare_with_claude(n_json, e_json)
 
-            # Format JSON with compact formatting and truncate if necessary
-            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
-            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
-            
             data_rows.append(
                 [
                     param,
-                    truncate_cell_content(notion_json_str),
-                    truncate_cell_content(erp_json_str),
-                    truncate_cell_content(cmp_text),
+                    json.dumps(n_json, ensure_ascii=False, indent=2),
+                    json.dumps(e_json, ensure_ascii=False, indent=2),
+                    cmp_text,
                 ]
             )
 
@@ -240,12 +236,11 @@ async def compare_data(request: ComparisonRequest):
         update_progress("Adding ERP-only parameters", 88, f"Adding {len(erp_only_params)} ERP-only parameters…")
         for param in erp_only_params:
             e_json = erp_lookup[param]
-            erp_json_str = json.dumps(e_json, ensure_ascii=False, separators=(',', ':'))
             data_rows.append(
                 [
                     param,
                     "{}",  # Empty JSON for Notion
-                    truncate_cell_content(erp_json_str),
+                    json.dumps(e_json, ensure_ascii=False, indent=2),
                     "Parameter missing in Notion",
                 ]
             )
@@ -254,11 +249,10 @@ async def compare_data(request: ComparisonRequest):
         update_progress("Adding Notion-only parameters", 89, f"Adding {len(notion_only_params)} Notion-only parameters…")
         for param in notion_only_params:
             n_json = notion_lookup[param]
-            notion_json_str = json.dumps(n_json, ensure_ascii=False, separators=(',', ':'))
             data_rows.append(
                 [
-                    param,
-                    truncate_cell_content(notion_json_str),
+                param,
+                    json.dumps(n_json, ensure_ascii=False, indent=2),
                     "{}",  # Empty JSON for ERP
                     "Parameter missing in ERP",
                 ]
@@ -302,10 +296,10 @@ async def compare_data(request: ComparisonRequest):
 
         sheet_url = create_shared_google_sheet(organized_data, section_headers)
         update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
-
+        
         elapsed = time.time() - start_time
         progress_data["status"] = "completed"
-
+        
         # Before returning, check cancellation once more
         if cancel_event.is_set():
             progress_data["status"] = "cancelled"
@@ -323,7 +317,7 @@ async def compare_data(request: ComparisonRequest):
                 "processingTime": f"{elapsed:.1f}s",
             },
         )
-
+        
     # ---------------------------------------------------------------
     # 3. Off-load work to a background thread & await result
     # ---------------------------------------------------------------

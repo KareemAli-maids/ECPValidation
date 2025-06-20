@@ -377,11 +377,11 @@ def fetch_one(ident: int) -> Dict[str, Any]:
         try:
             resp = requests.get(f"{API_ROOT}/{ident}", headers=DETAIL_HEADERS, timeout=30)
             logging.info("GET %s → %s (attempt %d)", ident, resp.status_code, attempt)
-
+    
             # Auth failures should abort immediately
             if resp.status_code in (401, 403):
                 raise ValueError("ERP Auth token expired. Please update your .env file.")
-
+    
             if resp.status_code == 200:
                 return resp.json()
 
@@ -851,6 +851,35 @@ def gather_notion_data() -> List[Dict[str, Any]]:
 # Google Sheets Helper
 # ---------------------------------------------------------------------------
 
+def split_large_text(text: str, max_chars: int = 45000) -> List[str]:
+    """Split large text into chunks that fit within Google Sheets cell limits."""
+    if len(text) <= max_chars:
+        return [text]  # Return single item list if no splitting needed
+    
+    chunks = []
+    remaining = text
+    
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+            
+        # Try to split at a reasonable boundary (like a comma or newline)
+        split_point = max_chars
+        
+        # Look for good split points (in order of preference)
+        for boundary in ['\n', ',', ' ', '"']:
+            last_boundary = remaining.rfind(boundary, 0, max_chars)
+            if last_boundary > max_chars * 0.8:  # Only use if it's not too early
+                split_point = last_boundary + 1
+                break
+        
+        chunk = remaining[:split_point]
+        chunks.append(chunk)
+        remaining = remaining[split_point:]
+    
+    return chunks
+
 def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None) -> str:
     """Create a Google Sheet with comparison data and share it with anyone who has the link."""
     try:
@@ -889,13 +918,13 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
             batch = data_rows[i:i + batch_size]
             start_row = i + 2  # +2 because we start after header row
             end_row = start_row + len(batch) - 1
-            range_name = f'A{start_row}:D{end_row}'
+            range_name = f'A{start_row}:D{end_row}'  # Updated to D for 4 columns
             worksheet.update(range_name, batch)
             logging.info(f"Updated rows {start_row}-{end_row}")
         
         # Format the sheet
         print("Formatting header...")
-        worksheet.format('A1:D1', {
+        worksheet.format('A1:D1', {  # Updated to D1 for 4 columns
             'backgroundColor': {'red': 0.94, 'green': 0.94, 'blue': 0.94},  # #f0f0f0
             'textFormat': {'bold': True}
         })
@@ -905,10 +934,10 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
         # ────────────────────────────────────────────────────────────────
         print("Applying custom column widths & wrapping…")
 
-        # Column pixel sizes – A:200px, B-D:500px (0-based indices)
+        # Column pixel sizes – A:200px, B-D:400px (0-based indices)
         sheet_id = worksheet._properties["sheetId"]
         width_requests = []
-        for idx, px in enumerate([200, 500, 500, 500]):
+        for idx, px in enumerate([200, 400, 400, 500]):  # Updated for 4 columns
             width_requests.append({
                 "updateDimensionProperties": {
                     "range": {
@@ -920,15 +949,15 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                     "properties": {"pixelSize": px},
                     "fields": "pixelSize",
                 }
-            })
-
+        })
+        
         # Apply batch update for column widths
         if width_requests:
             worksheet.spreadsheet.batch_update({"requests": width_requests})
 
         # Vertical align top & wrap text for entire data range
         end_row = len(data_rows) + 1  # +1 for header
-        data_range = f"A1:D{end_row}"
+        data_range = f"A1:D{end_row}"  # Updated to D for 4 columns
         worksheet.format(data_range, {
             "verticalAlignment": "TOP",
             "wrapStrategy": "WRAP"
@@ -942,13 +971,13 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                 
                 # Merge cells across the row for the header
                 try:
-                    worksheet.merge_cells(f'A{actual_row}:D{actual_row}')
+                    worksheet.merge_cells(f'A{actual_row}:D{actual_row}')  # Updated to D for 4 columns
                     print(f"✅ Merged cells for section header at row {actual_row}")
                 except Exception as merge_error:
                     print(f"⚠️ Could not merge cells for row {actual_row}: {merge_error}")
                 
                 # Apply red background and bold formatting
-                header_range = f'A{actual_row}:D{actual_row}'
+                header_range = f'A{actual_row}:D{actual_row}'  # Updated to D for 4 columns
                 worksheet.format(header_range, {
                     'backgroundColor': {'red': 0.9, 'green': 0.2, 'blue': 0.2},  # Red background
                     'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},  # White text
@@ -990,19 +1019,6 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
 # Main
 # ---------------------------------------------------------------------------
 
-def truncate_cell_content(content: str, max_chars: int = 45000) -> str:
-    """Truncate content to fit within Google Sheets cell limit (50,000 chars)."""
-    if len(content) <= max_chars:
-        return content
-    
-    truncated = content[:max_chars]
-    # Try to truncate at a reasonable boundary (end of line)
-    last_newline = truncated.rfind('\n')
-    if last_newline > max_chars * 0.8:  # If we can find a newline in the last 20%
-        truncated = truncated[:last_newline]
-    
-    return truncated + f"\n\n... [TRUNCATED - Original length: {len(content)} chars]"
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
 
@@ -1023,7 +1039,8 @@ def main() -> None:
     for param in tqdm(all_params, desc="Comparing"):
         notion_json = notion_lookup.get(param, {})
         erp_json = erp_lookup.get(param, {})
-        # Use Claude for comparison only if both sides exist
+        
+        # Use Claude for comparison with ORIGINAL complete data (before splitting)
         if notion_json and erp_json:
             comparison_text = compare_with_claude(notion_json, erp_json)
         elif notion_json and not erp_json:
@@ -1033,16 +1050,37 @@ def main() -> None:
         else:
             comparison_text = "No data"
 
-        # Format JSON with compact formatting and truncate if necessary
+        # Convert to compact JSON strings for Google Sheets (no indentation to save space)
         notion_json_str = json.dumps(notion_json, ensure_ascii=False, separators=(',', ':'))
         erp_json_str = json.dumps(erp_json, ensure_ascii=False, separators=(',', ':'))
         
-        data_rows.append([
-            param,
-            truncate_cell_content(notion_json_str),
-            truncate_cell_content(erp_json_str),
-            truncate_cell_content(comparison_text),
-        ])
+        # Split large JSON strings to avoid 50k character limit
+        notion_chunks = split_large_text(notion_json_str)
+        erp_chunks = split_large_text(erp_json_str)
+        
+        # Determine how many rows we need (max of notion and erp chunks)
+        max_chunks = max(len(notion_chunks), len(erp_chunks))
+        
+        # Create rows - first row has parameter name and comparison, subsequent rows are continuations
+        for i in range(max_chunks):
+            if i == 0:
+                # First row: include parameter name and comparison
+                row = [
+                    param,
+                    notion_chunks[i] if i < len(notion_chunks) else "",
+                    erp_chunks[i] if i < len(erp_chunks) else "",
+                    comparison_text
+                ]
+            else:
+                # Continuation rows: empty parameter name and comparison
+                row = [
+                    f"  └─ {param} (cont.)",  # Indented continuation indicator
+                    notion_chunks[i] if i < len(notion_chunks) else "",
+                    erp_chunks[i] if i < len(erp_chunks) else "",
+                    ""  # Empty comparison for continuation rows
+                ]
+            
+            data_rows.append(row)
 
     # Create shared Google Sheet
     sheet_url = create_shared_google_sheet(data_rows)
