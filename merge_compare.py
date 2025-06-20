@@ -145,7 +145,12 @@ COMPARISON_PROMPT = (
     "- Missing conditions that would cause incorrect routing or processing\n\n"
     "IGNORE:\n"
     "- Bracket types, escape characters, JSON formatting / ordering\n"
-    "- Prompt names, variable naming, condition order when logically equivalent\n\n"
+    "- Prompt names, variable naming, condition order when logically equivalent\n"
+    "- Empty or trivial 'else' conditions in ERP JSON (conditions with empty values, just dots '.', or whitespace)\n"
+    "- Additional 'else' conditions in ERP JSON that contain no meaningful content\n\n"
+    "## SPECIAL HANDLING FOR ERP 'ELSE' CONDITIONS:\n"
+    "The ERP system automatically includes 'else' conditions even when they are empty or contain only trivial content like '.' or whitespace. "
+    "Do NOT flag these as differences unless they contain actual meaningful logic or values that would change system behavior.\n\n"
     "RULES:\n"
     "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
     "2. Otherwise, list each issue as a bullet starting with * .\n\n"
@@ -485,13 +490,42 @@ def _fetch_all_children(block_id: str) -> List[dict]:
     return children
 
 def _plain_text(block: dict) -> str:
-    """Concatenate rich-text → plain string."""
+    """Concatenate rich-text → plain string.
+    
+    This function handles all types of rich text objects:
+    - text: regular text content
+    - mention: page mentions, user mentions, etc. (extracts the display name)
+    - equation: mathematical equations
+    And any other rich text types by falling back to their plain_text field.
+    """
     block_type = block.get("type", "")
     if block_type not in block:
         return ""
     
     rt = block[block_type].get("rich_text", [])
-    return "".join(piece.get("text", {}).get("content", "") for piece in rt)
+    text_parts = []
+    
+    for piece in rt:
+        piece_type = piece.get("type", "text")
+        
+        if piece_type == "text":
+            # Regular text content
+            text_content = piece.get("text", {}).get("content", "")
+            text_parts.append(text_content)
+        elif piece_type == "mention":
+            # Mentions (page links, user mentions, etc.) - use the display text
+            mention_text = piece.get("plain_text", "")
+            text_parts.append(mention_text)
+        elif piece_type == "equation":
+            # Mathematical equations - use the display text
+            equation_text = piece.get("plain_text", "")
+            text_parts.append(equation_text)
+        else:
+            # Fallback for any other rich text types - use plain_text field
+            fallback_text = piece.get("plain_text", "")
+            text_parts.append(fallback_text)
+    
+    return "".join(text_parts)
 
 def _extract_block_metadata(block: dict) -> Dict[str, Any]:
     """Extract comprehensive metadata from a block."""
@@ -640,7 +674,23 @@ class NotionDatabaseToCSV:
             for prop_name, prop_data in page["properties"].items():
                 if prop_data.get("type") == "title":
                     title_data = prop_data.get('title', [])
-                    clean_value = ' '.join([text.get('plain_text', '') for text in title_data if text])
+                    # Use the same rich text extraction logic as _plain_text function
+                    text_parts = []
+                    for text_obj in title_data:
+                        if text_obj:
+                            piece_type = text_obj.get("type", "text")
+                            if piece_type == "text":
+                                text_content = text_obj.get("text", {}).get("content", "")
+                                text_parts.append(text_content)
+                            elif piece_type == "mention":
+                                mention_text = text_obj.get("plain_text", "")
+                                text_parts.append(mention_text)
+                            else:
+                                # Fallback to plain_text for any other types
+                                fallback_text = text_obj.get("plain_text", "")
+                                text_parts.append(fallback_text)
+                    
+                    clean_value = "".join(text_parts).strip()
                     if clean_value:
                         page_name = clean_value
                         break
@@ -685,7 +735,7 @@ class NotionDatabaseToCSV:
                     i = j - 1
                 i += 1
 
-            identifier = f"TECHNICAL_FUNCTION_VALUE: {page_name.replace(' ', '_')}"
+            identifier = f"{page_name.replace(' ', '_')}"
 
             return {
                 "identifier": identifier,
