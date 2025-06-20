@@ -136,26 +136,41 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 COMPARISON_PROMPT = (
     "# JSON Configuration Semantic Comparison Prompt\n\n"
     "You are an expert JSON analyst specializing in TECHNICAL_FUNCTION_VALUE configuration comparison. "
-    "Your task is to identify ONLY meaningful semantic differences that would cause functional failures while being extremely strict about ignoring equivalent variations.\n\n"
-    "## CRITICAL FOCUS AREAS\n\n"
-    "ANALYZE ONLY:\n"
+    "Your task is to identify meaningful semantic differences that would cause functional failures by focusing primarily on the VALUES within each condition.\n\n"
+    "## PRIMARY FOCUS - CONDITION VALUES:\n"
+    "The most critical aspect is comparing the VALUES assigned to each condition. These must be functionally equivalent:\n"
+    "- Compare the actual return values/outputs for each conditional branch\n"
+    "- Values should be semantically identical (same content, different formatting is OK)\n"
+    "- Missing or different values that would change system output are critical differences\n"
+    "- Values that are logically equivalent but syntactically different are acceptable\n\n"
+    "## SECONDARY FOCUS - CONDITIONAL LOGIC:\n"
+    "ANALYZE:\n"
     "- Missing conditional branches that change business logic outcomes\n"
-    "- Additional conditional branches that change business logic outcomes\n  "
-    "- Different comparison values that alter system behavior\n"
+    "- Additional conditional branches that change business logic outcomes\n"
+    "- Different comparison operators or logic that alter system behavior\n"
     "- Missing conditions that would cause incorrect routing or processing\n\n"
-    "IGNORE:\n"
-    "- Bracket types, escape characters, JSON formatting / ordering\n"
-    "- Prompt names, variable naming, condition order when logically equivalent\n"
+    "## IGNORE (FORMATTING/SYNTAX ONLY):\n"
+    "- Bracket types, escape characters, JSON formatting, spacing, ordering\n"
+    "- Quote styles, case differences in non-functional elements\n"
+    "- Prompt names, variable naming when they don't affect logic\n"
     "- Empty or trivial 'else' conditions in ERP JSON (conditions with empty values, just dots '.', or whitespace)\n"
     "- Additional 'else' conditions in ERP JSON that contain no meaningful content\n\n"
     "## SPECIAL HANDLING FOR ERP 'ELSE' CONDITIONS:\n"
     "The ERP system automatically includes 'else' conditions even when they are empty or contain only trivial content like '.' or whitespace. "
     "Do NOT flag these as differences unless they contain actual meaningful logic or values that would change system behavior.\n\n"
+    "## STRICT VALUE COMPARISON EXAMPLES:\n"
+    "✅ ACCEPTABLE (same values, different format):\n"
+    "- Notion: 'Hello World' vs ERP: \"Hello World\"\n"
+    "- Notion: 'user.name' vs ERP: \"user.name\"\n"
+    "❌ UNACCEPTABLE (different values):\n"
+    "- Notion: 'Hello World' vs ERP: 'Hi World'\n"
+    "- Notion: 'user.name' vs ERP: 'user.email'\n\n"
     "RULES:\n"
     "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
-    "2. Otherwise, list each issue as a bullet starting with * .\n\n"
+    "2. Otherwise, list each issue as a bullet starting with * .\n"
+    "3. Focus primarily on VALUE differences that would change system behavior.\n\n"
     "## COMPARISON TASK\n"
-    "Compare these two JSON configurations and identify ONLY semantic differences that affect functionality:\n\n"
+    "Compare these two JSON configurations, focusing primarily on the VALUES within conditions:\n\n"
     "NOTION JSON (Reference):\n```json\n{{NOTION_JSON}}\n```\n\n"
     "ERP JSON (Target):\n```json\n{{ERP_JSON}}\n```\n"
 )
@@ -666,6 +681,61 @@ class NotionDatabaseToCSV:
 
         return result
 
+    def _extract_nested_content_recursively(self, blocks: List[Dict[str, Any]], start_index: int, target_depth: int) -> str:
+        """Recursively extract all nested content under a condition, preserving structure and numbering."""
+        content_parts = []
+        i = start_index
+        numbered_counters = {}  # Track numbering per depth level
+        
+        while i < len(blocks) and blocks[i]["depth"] > target_depth:
+            block = blocks[i]
+            block_type = block.get("type", "")
+            block_depth = block.get("depth", 0)
+            block_text = block.get("text", "").strip()
+            
+            # Skip empty blocks
+            if not block_text:
+                i += 1
+                continue
+            
+            # Calculate indentation based on depth relative to target
+            indent_level = block_depth - target_depth - 1
+            indent = "    " * indent_level  # 4 spaces per level
+            
+            # Handle different block types with appropriate formatting
+            if block_type == "bulleted_list_item":
+                content_parts.append(f"{indent}- {block_text}")
+            elif block_type == "numbered_list_item":
+                # Track numbering per depth level for proper sequential numbering
+                if block_depth not in numbered_counters:
+                    numbered_counters[block_depth] = 1
+                else:
+                    numbered_counters[block_depth] += 1
+                
+                number = numbered_counters[block_depth]
+                content_parts.append(f"{indent}{number}. {block_text}")
+            elif block_type == "paragraph":
+                content_parts.append(f"{indent}{block_text}")
+            elif block_type in ["heading_1", "heading_2", "heading_3"]:
+                # Add some emphasis for headings
+                content_parts.append(f"{indent}**{block_text}**")
+            elif block_type == "toggle":
+                content_parts.append(f"{indent}{block_text}")
+            elif block_type == "callout":
+                content_parts.append(f"{indent}💡 {block_text}")
+            elif block_type == "quote":
+                content_parts.append(f"{indent}> {block_text}")
+            elif block_type == "to_do":
+                # Check if it's completed (you might need to check block data for this)
+                content_parts.append(f"{indent}☐ {block_text}")
+            else:
+                # For any other block type, just add the text if it exists
+                content_parts.append(f"{indent}{block_text}")
+            
+            i += 1
+        
+        return "\n".join(content_parts)
+
     def _process_page(self, page_index: int, total_pages: int, page: dict) -> Optional[Dict[str, Any]]:
         """Process a single Notion page and return structured data."""
 
@@ -720,19 +790,43 @@ class NotionDatabaseToCSV:
                     condition_text = text.replace("[toggle]", "").strip()
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
+                    
+                    # Use the new recursive function to extract all nested content
                     j = i + 1
-                    values = []
+                    value_text = self._extract_nested_content_recursively(filtered_blocks, j, condition_depth)
+                    
+                    # Skip to the end of this condition's content
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
-                        inner_blk = filtered_blocks[j]
-                        if inner_blk.get("type") == "bulleted_list_item":
-                            values.append(inner_blk.get("text", "").strip())
                         j += 1
-                    value_text = " ".join(values)
+                    
                     conditional_logic.append({
                         "condition": condition_text,
                         "value": value_text
                     })
                     i = j - 1
+                
+                # Also handle cases where condition content is directly under headings or other blocks
+                elif btype in ["heading_1", "heading_2", "heading_3"] and "condition" in text.lower():
+                    condition_depth = blk.get("depth", 0)
+                    condition_text = text.strip()
+                    if condition_text.lower().startswith("condition "):
+                        condition_text = condition_text[10:].strip()
+                    
+                    # Use the new recursive function to extract all nested content
+                    j = i + 1
+                    value_text = self._extract_nested_content_recursively(filtered_blocks, j, condition_depth)
+                    
+                    # Skip to the end of this condition's content
+                    while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
+                        j += 1
+                    
+                    if value_text.strip():  # Only add if there's actual content
+                        conditional_logic.append({
+                            "condition": condition_text,
+                            "value": value_text
+                        })
+                    i = j - 1
+                
                 i += 1
 
             identifier = f"{page_name.replace(' ', '_')}"
