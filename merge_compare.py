@@ -136,41 +136,26 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 COMPARISON_PROMPT = (
     "# JSON Configuration Semantic Comparison Prompt\n\n"
     "You are an expert JSON analyst specializing in TECHNICAL_FUNCTION_VALUE configuration comparison. "
-    "Your task is to identify meaningful semantic differences that would cause functional failures by focusing primarily on the VALUES within each condition.\n\n"
-    "## PRIMARY FOCUS - CONDITION VALUES:\n"
-    "The most critical aspect is comparing the VALUES assigned to each condition. These must be functionally equivalent:\n"
-    "- Compare the actual return values/outputs for each conditional branch\n"
-    "- Values should be semantically identical (same content, different formatting is OK)\n"
-    "- Missing or different values that would change system output are critical differences\n"
-    "- Values that are logically equivalent but syntactically different are acceptable\n\n"
-    "## SECONDARY FOCUS - CONDITIONAL LOGIC:\n"
-    "ANALYZE:\n"
+    "Your task is to identify ONLY meaningful semantic differences that would cause functional failures while being extremely strict about ignoring equivalent variations.\n\n"
+    "## CRITICAL FOCUS AREAS\n\n"
+    "ANALYZE ONLY:\n"
     "- Missing conditional branches that change business logic outcomes\n"
-    "- Additional conditional branches that change business logic outcomes\n"
-    "- Different comparison operators or logic that alter system behavior\n"
+    "- Additional conditional branches that change business logic outcomes\n  "
+    "- Different comparison values that alter system behavior\n"
     "- Missing conditions that would cause incorrect routing or processing\n\n"
-    "## IGNORE (FORMATTING/SYNTAX ONLY):\n"
-    "- Bracket types, escape characters, JSON formatting, spacing, ordering\n"
-    "- Quote styles, case differences in non-functional elements\n"
-    "- Prompt names, variable naming when they don't affect logic\n"
+    "IGNORE:\n"
+    "- Bracket types, escape characters, JSON formatting / ordering\n"
+    "- Prompt names, variable naming, condition order when logically equivalent\n"
     "- Empty or trivial 'else' conditions in ERP JSON (conditions with empty values, just dots '.', or whitespace)\n"
     "- Additional 'else' conditions in ERP JSON that contain no meaningful content\n\n"
     "## SPECIAL HANDLING FOR ERP 'ELSE' CONDITIONS:\n"
     "The ERP system automatically includes 'else' conditions even when they are empty or contain only trivial content like '.' or whitespace. "
     "Do NOT flag these as differences unless they contain actual meaningful logic or values that would change system behavior.\n\n"
-    "## STRICT VALUE COMPARISON EXAMPLES:\n"
-    "✅ ACCEPTABLE (same values, different format):\n"
-    "- Notion: 'Hello World' vs ERP: \"Hello World\"\n"
-    "- Notion: 'user.name' vs ERP: \"user.name\"\n"
-    "❌ UNACCEPTABLE (different values):\n"
-    "- Notion: 'Hello World' vs ERP: 'Hi World'\n"
-    "- Notion: 'user.name' vs ERP: 'user.email'\n\n"
     "RULES:\n"
     "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
-    "2. Otherwise, list each issue as a bullet starting with * .\n"
-    "3. Focus primarily on VALUE differences that would change system behavior.\n\n"
+    "2. Otherwise, list each issue as a bullet starting with * .\n\n"
     "## COMPARISON TASK\n"
-    "Compare these two JSON configurations, focusing primarily on the VALUES within conditions:\n\n"
+    "Compare these two JSON configurations and identify ONLY semantic differences that affect functionality:\n\n"
     "NOTION JSON (Reference):\n```json\n{{NOTION_JSON}}\n```\n\n"
     "ERP JSON (Target):\n```json\n{{ERP_JSON}}\n```\n"
 )
@@ -698,6 +683,11 @@ class NotionDatabaseToCSV:
                 i += 1
                 continue
             
+            # Skip introductory blocks that contain "Value Below" or similar patterns
+            if self._is_introductory_block(block_text):
+                i += 1
+                continue
+            
             # Calculate indentation based on depth relative to target
             indent_level = block_depth - target_depth - 1
             indent = "    " * indent_level  # 4 spaces per level
@@ -734,7 +724,73 @@ class NotionDatabaseToCSV:
             
             i += 1
         
-        return "\n".join(content_parts)
+        result = "\n".join(content_parts)
+        
+        # Clean up any remaining introductory prefixes that might have been missed
+        result = self._clean_introductory_prefixes(result)
+        
+        return result
+    
+    def _is_introductory_block(self, text: str) -> bool:
+        """Check if a block is an introductory block that should be skipped."""
+        text_lower = text.lower().strip()
+        
+        # Common introductory patterns to skip
+        skip_patterns = [
+            "value below",
+            "values below",
+            "content below",
+            "see below",
+            "below",
+            "🔻",
+            "⬇️",
+            "↓"
+        ]
+        
+        for pattern in skip_patterns:
+            if pattern in text_lower:
+                return True
+        
+        # Skip very short blocks that are likely just indicators
+        if len(text.strip()) <= 3 and not text.strip().isalnum():
+            return True
+        
+        return False
+    
+    def _clean_introductory_prefixes(self, text: str) -> str:
+        """Clean up any remaining introductory prefixes from the extracted text."""
+        if not text:
+            return text
+        
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Remove lines that are just introductory indicators
+            if self._is_introductory_block(line.strip()):
+                continue
+            
+            # Clean up common prefixes within lines
+            cleaned_line = line
+            prefixes_to_remove = [
+                "> Value Below 🔻",
+                "Value Below 🔻",
+                "> Value Below",
+                "Value Below",
+                "🔻",
+                "> 🔻"
+            ]
+            
+            for prefix in prefixes_to_remove:
+                if cleaned_line.strip().startswith(prefix):
+                    # Remove the prefix and any following whitespace/newlines
+                    cleaned_line = cleaned_line.replace(prefix, "", 1).lstrip()
+                    break
+            
+            if cleaned_line.strip():  # Only add non-empty lines
+                cleaned_lines.append(cleaned_line)
+        
+        return '\n'.join(cleaned_lines)
 
     def _process_page(self, page_index: int, total_pages: int, page: dict) -> Optional[Dict[str, Any]]:
         """Process a single Notion page and return structured data."""
