@@ -668,66 +668,7 @@ class NotionDatabaseToCSV:
 
 
     
-    def _is_introductory_block(self, text: str) -> bool:
-        """Check if a block is an introductory block that should be skipped."""
-        text_lower = text.lower().strip()
-        
-        # Common introductory patterns to skip
-        skip_patterns = [
-            "value below",
-            "values below",
-            "content below",
-            "see below",
-            "below",
-            "🔻",
-            "⬇️",
-            "↓"
-        ]
-        
-        for pattern in skip_patterns:
-            if pattern in text_lower:
-                return True
-        
-        # Skip very short blocks that are likely just indicators
-        if len(text.strip()) <= 3 and not text.strip().isalnum():
-            return True
-        
-        return False
-    
-    def _clean_introductory_prefixes(self, text: str) -> str:
-        """Clean up any remaining introductory prefixes from the extracted text."""
-        if not text:
-            return text
-        
-        lines = text.split('\n')
-        cleaned_lines = []
-        
-        for line in lines:
-            # Remove lines that are just introductory indicators
-            if self._is_introductory_block(line.strip()):
-                continue
-            
-            # Clean up common prefixes within lines
-            cleaned_line = line
-            prefixes_to_remove = [
-                "> Value Below 🔻",
-                "Value Below 🔻",
-                "> Value Below",
-                "Value Below",
-                "🔻",
-                "> 🔻"
-            ]
-            
-            for prefix in prefixes_to_remove:
-                if cleaned_line.strip().startswith(prefix):
-                    # Remove the prefix and any following whitespace/newlines
-                    cleaned_line = cleaned_line.replace(prefix, "", 1).lstrip()
-                    break
-            
-            if cleaned_line.strip():  # Only add non-empty lines
-                cleaned_lines.append(cleaned_line)
-        
-        return '\n'.join(cleaned_lines)
+
 
     def _process_page(self, page_index: int, total_pages: int, page: dict) -> Optional[Dict[str, Any]]:
         """Process a single Notion page and return structured data."""
@@ -783,66 +724,27 @@ class NotionDatabaseToCSV:
                     condition_text = text.replace("[toggle]", "").strip()
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
-                    
-                    # Simplified approach: collect all text from child blocks (much faster)
                     j = i + 1
                     values = []
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
                         inner_blk = filtered_blocks[j]
                         inner_text = inner_blk.get("text", "").strip()
+                        block_type = inner_blk.get("type", "")
                         
-                        # Skip introductory blocks but include all content blocks
-                        if inner_text and not self._is_introductory_block(inner_text):
-                            # Add appropriate formatting based on block type
-                            block_type = inner_blk.get("type", "")
-                            if block_type == "bulleted_list_item":
-                                values.append(f"- {inner_text}")
-                            elif block_type == "numbered_list_item":
-                                values.append(f"1. {inner_text}")  # Simple numbering
-                            else:
-                                values.append(inner_text)
+                        # Include both bulleted and numbered lists (fast and simple)
+                        if block_type == "bulleted_list_item" and inner_text:
+                            values.append(inner_text)
+                        elif block_type == "numbered_list_item" and inner_text:
+                            values.append(inner_text)
                         j += 1
-                    
-                    value_text = "\n".join(values) if values else ""
-                    
+                    value_text = " ".join(values)
                     conditional_logic.append({
                         "condition": condition_text,
                         "value": value_text
                     })
                     i = j - 1
                 
-                # Also handle cases where condition content is directly under headings or other blocks
-                elif btype in ["heading_1", "heading_2", "heading_3"] and "condition" in text.lower():
-                    condition_depth = blk.get("depth", 0)
-                    condition_text = text.strip()
-                    if condition_text.lower().startswith("condition "):
-                        condition_text = condition_text[10:].strip()
-                    
-                    # Simplified approach for headings too
-                    j = i + 1
-                    values = []
-                    while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
-                        inner_blk = filtered_blocks[j]
-                        inner_text = inner_blk.get("text", "").strip()
-                        
-                        if inner_text and not self._is_introductory_block(inner_text):
-                            block_type = inner_blk.get("type", "")
-                            if block_type == "bulleted_list_item":
-                                values.append(f"- {inner_text}")
-                            elif block_type == "numbered_list_item":
-                                values.append(f"1. {inner_text}")
-                            else:
-                                values.append(inner_text)
-                        j += 1
-                    
-                    value_text = "\n".join(values) if values else ""
-                    
-                    if value_text.strip():  # Only add if there's actual content
-                        conditional_logic.append({
-                            "condition": condition_text,
-                            "value": value_text
-                        })
-                    i = j - 1
+
                 
                 i += 1
 
