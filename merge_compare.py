@@ -882,7 +882,7 @@ def gather_notion_data() -> List[Dict[str, Any]]:
 
     tech_valid_prop = None
     for prop_name in database_info.get("properties", {}):
-        if prop_name.lower().strip() == "To be Validated":
+        if prop_name.lower().strip() == "to be validated":
             tech_valid_prop = prop_name
             break
 
