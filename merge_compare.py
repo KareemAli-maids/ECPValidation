@@ -744,18 +744,33 @@ class NotionDatabaseToCSV:
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
                     
-                    # Use original fast algorithm - collect all nested text
+                    # Use original fast algorithm with simple numbering
                     j = i + 1
                     values = []
+                    current_number = 1  # Simple counter for numbered items
+                    
                     while j < n_blocks and filtered_blocks[j]["depth"] > condition_depth:
                         inner_blk = filtered_blocks[j]
                         inner_text = inner_blk.get("text", "").strip()
-                        if inner_text:  # Include any non-empty text (not just bulleted_list_item)
-                            values.append(inner_text)
+                        inner_type = inner_blk.get("type", "")
+                        
+                        if inner_text:
+                            if inner_type == "numbered_list_item":
+                                # Add the number prefix for numbered list items
+                                formatted_text = f"{current_number}. {inner_text}"
+                                values.append(formatted_text)
+                                current_number += 1
+                            elif inner_type == "bulleted_list_item":
+                                # Add bullet for bulleted list items
+                                formatted_text = f"- {inner_text}"
+                                values.append(formatted_text)
+                            else:
+                                # Regular text - just add as is
+                                values.append(inner_text)
                         j += 1
                     
-                    # Join all values and clean up
-                    value_text = " ".join(values)
+                    # Join with newlines for better structure and clean up
+                    value_text = "\n".join(values)
                     value_text = self._clean_value_text(value_text)
                     
                     conditional_logic.append({
