@@ -625,24 +625,48 @@ class NotionDatabaseToCSV:
 
 
     def extract_technical_ecp_only(self, page_id: str) -> List[Dict[str, Any]]:
-        """Fast breadth-first extraction with early termination."""
+        """Efficient breadth-first search for Technical ECP with early termination."""
         
-        # Start with immediate children of the page
-        try:
-            immediate_children = _fetch_all_children(page_id)
-        except Exception as e:
-            log.warning("Failed to fetch page children for %s: %s", page_id[:8], e)
-            return []
-        
-        # Quick scan of immediate children for Technical ECP
+        # Breadth-first search with limited depth to find Technical ECP
         ecp_block = None
-        for child in immediate_children:
-            text = _plain_text(child).strip()
-            if text.lower().startswith("technical ecp"):
-                ecp_block = child
+        blocks_to_search = [page_id]
+        searched_blocks = set()
+        max_search_depth = 3  # Limit search depth for performance
+        
+        for depth in range(max_search_depth):
+            if not blocks_to_search or ecp_block:
                 break
+                
+            next_level_blocks = []
+            
+            for block_id in blocks_to_search:
+                if block_id in searched_blocks:
+                    continue
+                searched_blocks.add(block_id)
+                
+                try:
+                    children = _fetch_all_children(block_id)
+                    for child in children:
+                        text = _plain_text(child).strip()
+                        if text.lower().startswith("technical ecp"):
+                            ecp_block = child
+                            break
+                        
+                        # Add to next level if it has children
+                        if child.get("has_children"):
+                            next_level_blocks.append(child["id"])
+                    
+                    if ecp_block:
+                        break
+                        
+                except Exception as e:
+                    log.warning("Failed to fetch children for block %s: %s", block_id[:8], e)
+                    continue
+            
+            blocks_to_search = next_level_blocks
         
         if not ecp_block:
+            log.debug("No Technical ECP block found in page %s", page_id[:8])
             return []
         
         # Found it! Now get its descendants efficiently
@@ -658,19 +682,15 @@ class NotionDatabaseToCSV:
             "full_block_json": ""
         })
         
-        # Get all descendants in a single breadth-first pass
+        # Get all descendants using the fast algorithm
         if ecp_block.get("has_children"):
             try:
-                descendants = _fetch_all_children(ecp_block["id"])
-                for child in descendants:
-                    metadata = _extract_block_metadata(child)
-                    content = _extract_block_content(child, self.notion)
-                    result.append({
-                        **metadata,
-                        **content,
-                        "depth": 1,  # Simple depth for now
-                        "full_block_json": ""
-                    })
+                # Use the existing fast algorithm for descendants
+                descendant_blocks = self.extract_all_blocks_using_working_algorithm(ecp_block["id"])
+                for blk in descendant_blocks:
+                    blk["depth"] += 1  # Adjust depth
+                    blk["full_block_json"] = ""  # Clean up for performance
+                result.extend(descendant_blocks)
             except Exception as e:
                 log.warning("Failed to fetch ECP descendants: %s", e)
         
