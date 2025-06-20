@@ -880,18 +880,65 @@ def gather_notion_data() -> List[Dict[str, Any]]:
     database_id = processor.extract_database_id_from_url(DATABASE_URL)
     database_info = processor.notion.databases.retrieve(database_id)
 
-    tech_valid_prop = None
+    to_be_validated_prop = None
+    technical_validated_prop = None
+    
     for prop_name in database_info.get("properties", {}):
-        if prop_name.lower().strip() == "to be validated":
-            tech_valid_prop = prop_name
-            break
+        prop_name_lower = prop_name.lower().strip()
+        if prop_name_lower == "to be validated":
+            to_be_validated_prop = prop_name
+        elif prop_name_lower == "technical validated":
+            technical_validated_prop = prop_name
 
     filter_payload: Dict[str, Any] | None = None
-    if tech_valid_prop:
-        prop_info = database_info["properties"][tech_valid_prop]
+    if to_be_validated_prop and technical_validated_prop:
+        # Build compound filter: "To be Validated" is true AND "Technical Validated" is false
+        to_be_validated_info = database_info["properties"][to_be_validated_prop]
+        technical_validated_info = database_info["properties"][technical_validated_prop]
+        
+        to_be_validated_type = to_be_validated_info.get("type")
+        technical_validated_type = technical_validated_info.get("type")
+        
+        # Build first condition: "To be Validated" is true
+        to_be_validated_filter = None
+        if to_be_validated_type == "checkbox":
+            to_be_validated_filter = {"property": to_be_validated_prop, "checkbox": {"equals": True}}
+        elif to_be_validated_type in {"status", "select"}:
+            truthy_labels = {"true", "yes", "validated", "done", "complete"}
+            chosen = "True"
+            for opt in to_be_validated_info.get(to_be_validated_type, {}).get("options", []):
+                if opt.get("name", "").lower() in truthy_labels:
+                    chosen = opt["name"]
+                    break
+            to_be_validated_filter = {"property": to_be_validated_prop, to_be_validated_type: {"equals": chosen}}
+        
+        # Build second condition: "Technical Validated" is false
+        technical_validated_filter = None
+        if technical_validated_type == "checkbox":
+            technical_validated_filter = {"property": technical_validated_prop, "checkbox": {"equals": False}}
+        elif technical_validated_type in {"status", "select"}:
+            falsy_labels = {"false", "no", "not validated", "pending", "incomplete"}
+            chosen = "False"
+            for opt in technical_validated_info.get(technical_validated_type, {}).get("options", []):
+                if opt.get("name", "").lower() in falsy_labels:
+                    chosen = opt["name"]
+                    break
+            technical_validated_filter = {"property": technical_validated_prop, technical_validated_type: {"equals": chosen}}
+        
+        # Combine both conditions with AND logic
+        if to_be_validated_filter and technical_validated_filter:
+            filter_payload = {
+                "and": [
+                    to_be_validated_filter,
+                    technical_validated_filter
+                ]
+            }
+    elif to_be_validated_prop:
+        # Fallback: if only "To be Validated" column exists, use original logic
+        prop_info = database_info["properties"][to_be_validated_prop]
         prop_type = prop_info.get("type")
         if prop_type == "checkbox":
-            filter_payload = {"property": tech_valid_prop, "checkbox": {"equals": True}}
+            filter_payload = {"property": to_be_validated_prop, "checkbox": {"equals": True}}
         elif prop_type in {"status", "select"}:
             truthy_labels = {"true", "yes", "validated", "done", "complete"}
             chosen = "True"
@@ -899,7 +946,7 @@ def gather_notion_data() -> List[Dict[str, Any]]:
                 if opt.get("name", "").lower() in truthy_labels:
                     chosen = opt["name"]
                     break
-            filter_payload = {"property": tech_valid_prop, prop_type: {"equals": chosen}}
+            filter_payload = {"property": to_be_validated_prop, prop_type: {"equals": chosen}}
 
     pages: List[Dict[str, Any]] = []
     has_more = True
@@ -1189,28 +1236,32 @@ def main() -> None:
     all_params = sorted(set(notion_lookup) | set(erp_lookup))
     logging.info("Total parameters: Notion=%d, ERP=%d, Combined=%d", len(notion_lookup), len(erp_lookup), len(all_params))
 
+    # Separate parameters by type
+    both_params = []  # Parameters in both Notion and ERP
+    notion_only_params = []  # Parameters only in Notion
+    erp_only_params = []  # Parameters only in ERP
+    
+    for param in all_params:
+        if param in notion_lookup and param in erp_lookup:
+            both_params.append(param)
+        elif param in notion_lookup:
+            notion_only_params.append(param)
+        elif param in erp_lookup:
+            erp_only_params.append(param)
+    
+    both_params.sort()
+    notion_only_params.sort()
+    erp_only_params.sort()
+    
+    logging.info("Parameter distribution - Both: %d, Notion-only: %d, ERP-only: %d", 
+                len(both_params), len(notion_only_params), len(erp_only_params))
+
     # Prepare data rows for Google Sheets
     data_rows = []
-
-    for i, param in enumerate(tqdm(all_params, desc="Comparing")):
-        # Check cancellation during comparison loop
-        if cancel_event and cancel_event.is_set():
-            logging.info("Process cancelled during parameter comparison at %d/%d", i, len(all_params))
-            return
-            
-        notion_json = notion_lookup.get(param, {})
-        erp_json = erp_lookup.get(param, {})
-        
-        # Use Claude for comparison with ORIGINAL complete data (before splitting)
-        if notion_json and erp_json:
-            comparison_text = compare_with_claude(notion_json, erp_json)
-        elif notion_json and not erp_json:
-            comparison_text = "Parameter missing in ERP"
-        elif erp_json and not notion_json:
-            comparison_text = "Parameter missing in Notion"
-        else:
-            comparison_text = "No data"
-
+    section_headers = []  # Track section header row indices
+    
+    def add_parameter_rows(param: str, notion_json: dict, erp_json: dict, comparison_text: str):
+        """Helper function to add parameter rows with proper formatting"""
         # Apply logical operator replacements to Notion JSON before pretty-printing
         processed_notion_json = replace_logical_operators(notion_json) if notion_json else notion_json
 
@@ -1245,6 +1296,47 @@ def main() -> None:
                 ]
             
             data_rows.append(row)
+    
+    # 1. First: Parameters that exist in both sources (comparison)
+    for i, param in enumerate(tqdm(both_params, desc="Comparing matched parameters")):
+        # Check cancellation during comparison loop
+        if cancel_event and cancel_event.is_set():
+            logging.info("Process cancelled during comparison at %d/%d", i, len(both_params))
+            return
+            
+        notion_json = notion_lookup[param]
+        erp_json = erp_lookup[param]
+        comparison_text = compare_with_claude(notion_json, erp_json)
+        
+        add_parameter_rows(param, notion_json, erp_json, comparison_text)
+
+    # 2. Second: Add section header for Notion-only parameters
+    if notion_only_params:
+        section_headers.append(len(data_rows))  # Record the row index for formatting
+        data_rows.append(["=== NOTION-ONLY PARAMETERS ===", "", "", ""])
+        
+        for i, param in enumerate(tqdm(notion_only_params, desc="Processing Notion-only parameters")):
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                logging.info("Process cancelled during Notion-only processing at %d/%d", i, len(notion_only_params))
+                return
+                
+            notion_json = notion_lookup[param]
+            add_parameter_rows(param, notion_json, {}, "Parameter missing in ERP")
+
+    # 3. Third: Add section header for ERP-only parameters
+    if erp_only_params:
+        section_headers.append(len(data_rows))  # Record the row index for formatting
+        data_rows.append(["=== ERP-ONLY PARAMETERS ===", "", "", ""])
+        
+        for i, param in enumerate(tqdm(erp_only_params, desc="Processing ERP-only parameters")):
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                logging.info("Process cancelled during ERP-only processing at %d/%d", i, len(erp_only_params))
+                return
+                
+            erp_json = erp_lookup[param]
+            add_parameter_rows(param, {}, erp_json, "Parameter missing in Notion")
 
     # Final cancellation check before creating sheet
     if cancel_event and cancel_event.is_set():
@@ -1252,7 +1344,7 @@ def main() -> None:
         return
 
     # Create shared Google Sheet
-    sheet_url = create_shared_google_sheet(data_rows)
+    sheet_url = create_shared_google_sheet(data_rows, section_headers)
     logging.info("🎉 Comparison complete! Sheet URL: %s", sheet_url)
 
 
