@@ -1051,7 +1051,7 @@ def split_large_text(text: str, max_chars: int = 45000) -> List[str]:
     
     return chunks
 
-def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None, red_highlight_cells: List[tuple] = None) -> str:
+def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List[int] = None) -> str:
     """Create a Google Sheet with comparison data and share it with anyone who has the link."""
     try:
         # Set up credentials and authorize
@@ -1080,7 +1080,7 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
         
         # Add header and data
         print("Adding header row...")
-        worksheet.update('A1:D1', [['Parameter', 'Notion JSON', 'ERP JSON', 'Claude Comparison']])
+        worksheet.update('A1:F1', [['Parameter', 'Notion JSON', 'ERP JSON', 'Claude Comparison', 'Notion Boolean Error', 'ERP Boolean Error']])
         
         # Add data in batches (Google Sheets API has limits)
         print(f"Adding {len(data_rows)} data rows...")
@@ -1089,13 +1089,13 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
             batch = data_rows[i:i + batch_size]
             start_row = i + 2  # +2 because we start after header row
             end_row = start_row + len(batch) - 1
-            range_name = f'A{start_row}:D{end_row}'  # Updated to D for 4 columns
+            range_name = f'A{start_row}:F{end_row}'  # Updated to F for 6 columns
             worksheet.update(range_name, batch)
             logging.info(f"Updated rows {start_row}-{end_row}")
         
         # Format the sheet
         print("Formatting header...")
-        worksheet.format('A1:D1', {  # Updated to D1 for 4 columns
+        worksheet.format('A1:F1', {  # Updated to F1 for 6 columns
             'backgroundColor': {'red': 0.94, 'green': 0.94, 'blue': 0.94},  # #f0f0f0
             'textFormat': {'bold': True}
         })
@@ -1105,10 +1105,10 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
         # ────────────────────────────────────────────────────────────────
         print("Applying custom column widths & wrapping…")
 
-        # Column pixel sizes – A:200px, B-D:400px (0-based indices)
+        # Column pixel sizes – A:200px, B-D:400px, E-F:150px (0-based indices)
         sheet_id = worksheet._properties["sheetId"]
         width_requests = []
-        for idx, px in enumerate([200, 400, 400, 500]):  # Updated for 4 columns
+        for idx, px in enumerate([200, 400, 400, 500, 150, 150]):  # Updated for 6 columns
             width_requests.append({
                 "updateDimensionProperties": {
                     "range": {
@@ -1128,7 +1128,7 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
 
         # Vertical align top & wrap text for entire data range
         end_row = len(data_rows) + 1  # +1 for header
-        data_range = f"A1:D{end_row}"  # Updated to D for 4 columns
+        data_range = f"A1:F{end_row}"  # Updated to F for 6 columns
         worksheet.format(data_range, {
             "verticalAlignment": "TOP",
             "wrapStrategy": "WRAP"
@@ -1142,13 +1142,13 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                 
                 # Merge cells across the row for the header
                 try:
-                    worksheet.merge_cells(f'A{actual_row}:D{actual_row}')  # Updated to D for 4 columns
+                    worksheet.merge_cells(f'A{actual_row}:F{actual_row}')  # Updated to F for 6 columns
                     print(f"✅ Merged cells for section header at row {actual_row}")
                 except Exception as merge_error:
                     print(f"⚠️ Could not merge cells for row {actual_row}: {merge_error}")
                 
                 # Apply red background and bold formatting
-                header_range = f'A{actual_row}:D{actual_row}'  # Updated to D for 4 columns
+                header_range = f'A{actual_row}:F{actual_row}'  # Updated to F for 6 columns
                 worksheet.format(header_range, {
                     'backgroundColor': {'red': 0.9, 'green': 0.2, 'blue': 0.2},  # Red background
                     'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},  # White text
@@ -1157,22 +1157,74 @@ def create_shared_google_sheet(data_rows: List[List[str]], section_headers: List
                 })
                 print(f"✅ Applied red formatting to section header at row {actual_row}")
         
-        # Format cells with uppercase booleans (red highlighting)
-        if red_highlight_cells:
-            print(f"Highlighting {len(red_highlight_cells)} cells with uppercase booleans...")
-            for row_idx, col_idx in red_highlight_cells:
-                actual_row = row_idx + 2  # +2 because we start after main header row
-                col_letter = ['A', 'B', 'C', 'D'][col_idx]  # Convert column index to letter
-                cell_range = f'{col_letter}{actual_row}'
-                
-                try:
-                    worksheet.format(cell_range, {
-                        'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8},  # Light red background
-                        'textFormat': {'bold': True}  # Bold text for emphasis
-                    })
-                    print(f"✅ Highlighted cell {cell_range} for uppercase boolean")
-                except Exception as highlight_error:
-                    print(f"⚠️ Could not highlight cell {cell_range}: {highlight_error}")
+        # Add data validation and conditional formatting for boolean error columns
+        print("Setting up dropdown validation and conditional formatting for boolean error columns...")
+        
+        # Add data validation for columns E and F (Boolean Error columns)
+        end_row = len(data_rows) + 1  # +1 for header
+        
+        # Column E: Notion Boolean Error
+        try:
+            worksheet.add_validation(f'E2:E{end_row}', {
+                'condition': {
+                    'type': 'ONE_OF_LIST',
+                    'values': [
+                        {'userEnteredValue': 'Yes'},
+                        {'userEnteredValue': 'No'}
+                    ]
+                },
+                'strict': True,
+                'showCustomUi': True
+            })
+            print("✅ Added dropdown validation for Notion Boolean Error column")
+        except Exception as e:
+            print(f"⚠️ Could not add validation for column E: {e}")
+        
+        # Column F: ERP Boolean Error  
+        try:
+            worksheet.add_validation(f'F2:F{end_row}', {
+                'condition': {
+                    'type': 'ONE_OF_LIST',
+                    'values': [
+                        {'userEnteredValue': 'Yes'},
+                        {'userEnteredValue': 'No'}
+                    ]
+                },
+                'strict': True,
+                'showCustomUi': True
+            })
+            print("✅ Added dropdown validation for ERP Boolean Error column")
+        except Exception as e:
+            print(f"⚠️ Could not add validation for column F: {e}")
+        
+        # Add conditional formatting - Red background for "Yes", Green background for "No"
+        try:
+            # Red formatting for "Yes" values in both columns
+            worksheet.add_conditional_formatting(f'E2:F{end_row}', {
+                'condition': {
+                    'type': 'TEXT_EQ',
+                    'values': [{'userEnteredValue': 'Yes'}]
+                },
+                'format': {
+                    'backgroundColor': {'red': 1.0, 'green': 0.8, 'blue': 0.8},  # Light red
+                    'textFormat': {'bold': True}
+                }
+            })
+            
+            # Green formatting for "No" values in both columns
+            worksheet.add_conditional_formatting(f'E2:F{end_row}', {
+                'condition': {
+                    'type': 'TEXT_EQ',
+                    'values': [{'userEnteredValue': 'No'}]
+                },
+                'format': {
+                    'backgroundColor': {'red': 0.8, 'green': 1.0, 'blue': 0.8},  # Light green
+                    'textFormat': {'bold': True}
+                }
+            })
+            print("✅ Added conditional formatting for boolean error columns")
+        except Exception as e:
+            print(f"⚠️ Could not add conditional formatting: {e}")
         
         # Share with anyone who has the link (instead of domain restriction)
         print("Attempting to share with anyone who has the link...")
@@ -1299,7 +1351,6 @@ def main() -> None:
     # Prepare data rows for Google Sheets
     data_rows = []
     section_headers = []  # Track section header row indices
-    red_highlight_cells = []  # Track cells that need red highlighting due to uppercase booleans
     
     def add_parameter_rows(param: str, notion_json: dict, erp_json: dict, comparison_text: str):
         """Helper function to add parameter rows with proper formatting"""
@@ -1327,36 +1378,26 @@ def main() -> None:
         
         # Create rows - first row has parameter name and comparison, subsequent rows are continuations
         for j in range(max_chunks):
-            current_row_index = len(data_rows)
-            
             if j == 0:
-                # First row: include parameter name and comparison
+                # First row: include parameter name, comparison, and boolean error indicators
                 row = [
                     param,
                     notion_chunks[j] if j < len(notion_chunks) else "",
                     erp_chunks[j] if j < len(erp_chunks) else "",
-                    comparison_text
+                    comparison_text,
+                    "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error
+                    "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
                 ]
-                
-                # Track cells that need red highlighting (only for first row with main content)
-                if notion_has_uppercase and notion_chunks[j]:
-                    red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
-                if erp_has_uppercase and erp_chunks[j]:
-                    red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
             else:
-                # Continuation rows: empty parameter name and comparison
+                # Continuation rows: empty parameter name and comparison, but keep boolean indicators
                 row = [
                     f"  └─ {param} (cont.)",  # Indented continuation indicator
                     notion_chunks[j] if j < len(notion_chunks) else "",
                     erp_chunks[j] if j < len(erp_chunks) else "",
-                    ""  # Empty comparison for continuation rows
+                    "",  # Empty comparison for continuation rows
+                    "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error  
+                    "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
                 ]
-                
-                # Track cells that need red highlighting for continuation rows too
-                if notion_has_uppercase and notion_chunks[j]:
-                    red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
-                if erp_has_uppercase and erp_chunks[j]:
-                    red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
             
             data_rows.append(row)
     
@@ -1373,10 +1414,10 @@ def main() -> None:
         
         add_parameter_rows(param, notion_json, erp_json, comparison_text)
 
-    # 2. Second: Add section header for Notion-only parameters
-    if notion_only_params:
-        section_headers.append(len(data_rows))  # Record the row index for formatting
-        data_rows.append(["=== NOTION-ONLY PARAMETERS ===", "", "", ""])
+            # 2. Second: Add section header for Notion-only parameters
+        if notion_only_params:
+            section_headers.append(len(data_rows))  # Record the row index for formatting
+            data_rows.append(["=== NOTION-ONLY PARAMETERS ===", "", "", "", "", ""])
         
         for i, param in enumerate(tqdm(notion_only_params, desc="Processing Notion-only parameters")):
             # Check cancellation
@@ -1387,10 +1428,10 @@ def main() -> None:
             notion_json = notion_lookup[param]
             add_parameter_rows(param, notion_json, {}, "Parameter missing in ERP")
 
-    # 3. Third: Add section header for ERP-only parameters
-    if erp_only_params:
-        section_headers.append(len(data_rows))  # Record the row index for formatting
-        data_rows.append(["=== ERP-ONLY PARAMETERS ===", "", "", ""])
+            # 3. Third: Add section header for ERP-only parameters
+        if erp_only_params:
+            section_headers.append(len(data_rows))  # Record the row index for formatting
+            data_rows.append(["=== ERP-ONLY PARAMETERS ===", "", "", "", "", ""])
         
         for i, param in enumerate(tqdm(erp_only_params, desc="Processing ERP-only parameters")):
             # Check cancellation
@@ -1407,7 +1448,7 @@ def main() -> None:
         return
 
     # Create shared Google Sheet
-    sheet_url = create_shared_google_sheet(data_rows, section_headers, red_highlight_cells)
+    sheet_url = create_shared_google_sheet(data_rows, section_headers)
     logging.info("🎉 Comparison complete! Sheet URL: %s", sheet_url)
 
 

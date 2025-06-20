@@ -202,7 +202,6 @@ async def compare_data(request: ComparisonRequest):
         import json
         data_rows: list[list[str]] = []
         section_headers: list[int] = []  # Track section header row indices
-        red_highlight_cells: list[tuple] = []  # Track cells that need red highlighting due to uppercase booleans
         
         def add_parameter_rows(param: str, notion_json: dict, erp_json: dict, comparison_text: str):
             """Helper function to add parameter rows with proper formatting"""
@@ -232,36 +231,26 @@ async def compare_data(request: ComparisonRequest):
             
             # Create rows - first row has parameter name and comparison, subsequent rows are continuations
             for j in range(max_chunks):
-                current_row_index = len(data_rows)
-                
                 if j == 0:
-                    # First row: include parameter name and comparison
+                    # First row: include parameter name, comparison, and boolean error indicators
                     row = [
                         param,
                         notion_chunks[j] if j < len(notion_chunks) else "",
                         erp_chunks[j] if j < len(erp_chunks) else "",
-                        comparison_text
+                        comparison_text,
+                        "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error
+                        "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
                     ]
-                    
-                    # Track cells that need red highlighting (only for first row with main content)
-                    if notion_has_uppercase and notion_chunks[j]:
-                        red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
-                    if erp_has_uppercase and erp_chunks[j]:
-                        red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
                 else:
-                    # Continuation rows: empty parameter name and comparison
+                    # Continuation rows: empty parameter name and comparison, but keep boolean indicators
                     row = [
                         f"  └─ {param} (cont.)",  # Indented continuation indicator
                         notion_chunks[j] if j < len(notion_chunks) else "",
                         erp_chunks[j] if j < len(erp_chunks) else "",
-                        ""  # Empty comparison for continuation rows
+                        "",  # Empty comparison for continuation rows
+                        "Yes" if notion_has_uppercase and notion_chunks[j] else "No",  # Notion Boolean Error  
+                        "Yes" if erp_has_uppercase and erp_chunks[j] else "No"        # ERP Boolean Error
                     ]
-                    
-                    # Track cells that need red highlighting for continuation rows too
-                    if notion_has_uppercase and notion_chunks[j]:
-                        red_highlight_cells.append((current_row_index, 1))  # Column B (Notion JSON)
-                    if erp_has_uppercase and erp_chunks[j]:
-                        red_highlight_cells.append((current_row_index, 2))  # Column C (ERP JSON)
                 
                 data_rows.append(row)
         
@@ -291,7 +280,7 @@ async def compare_data(request: ComparisonRequest):
         # 2. Second: Add section header for Notion-only parameters
         if notion_only_params:
             section_headers.append(len(data_rows))  # Record the row index for formatting
-            data_rows.append(["=== NOTION-ONLY PARAMETERS ===", "", "", ""])
+            data_rows.append(["=== NOTION-ONLY PARAMETERS ===", "", "", "", "", ""])
             
             update_progress("Processing Notion-only parameters", 86, f"Adding {len(notion_only_params)} Notion-only parameters…")
             for idx, param in enumerate(notion_only_params):
@@ -311,7 +300,7 @@ async def compare_data(request: ComparisonRequest):
         # 3. Third: Add section header for ERP-only parameters
         if erp_only_params:
             section_headers.append(len(data_rows))  # Record the row index for formatting
-            data_rows.append(["=== ERP-ONLY PARAMETERS ===", "", "", ""])
+            data_rows.append(["=== ERP-ONLY PARAMETERS ===", "", "", "", "", ""])
             
             update_progress("Processing ERP-only parameters", 88, f"Adding {len(erp_only_params)} ERP-only parameters…")
             for idx, param in enumerate(erp_only_params):
@@ -334,7 +323,7 @@ async def compare_data(request: ComparisonRequest):
         update_progress("Generating comparison report", 90, "Analysis complete, preparing report…")
         update_progress("Creating Google Sheet", 95, "Setting up Google Sheets…")
 
-        sheet_url = create_shared_google_sheet(data_rows, section_headers, red_highlight_cells)
+        sheet_url = create_shared_google_sheet(data_rows, section_headers)
         update_progress("Creating Google Sheet", 100, "Google Sheet created successfully!")
         
         elapsed = time.time() - start_time
