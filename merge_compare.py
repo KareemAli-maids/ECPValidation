@@ -136,40 +136,35 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 COMPARISON_PROMPT = (
     "# JSON Configuration Semantic Comparison Prompt\n\n"
     "You are an expert JSON analyst specializing in TECHNICAL_FUNCTION_VALUE configuration comparison. "
-    "Your task is to identify differences that would cause functional failures with STRICT parameter name checking.\n\n"
-    "## CRITICAL FOCUS AREAS\n\n"
-    "ANALYZE AND FLAG:\n"
-    "- Missing conditional branches that change business logic outcomes\n"
-    "- Additional conditional branches that change business logic outcomes\n"
-    "- Different comparison values that alter system behavior\n"
-    "- Missing conditions that would cause incorrect routing or processing\n"
-    "- **PARAMETER NAME DIFFERENCES**: Any difference in parameter names within conditions, including:\n"
-    "  * Case differences (e.g., 'facilityname' vs 'Facilityname')\n"
-    "  * Punctuation differences (e.g., 'facility.name' vs 'facilityname')\n"
-    "  * Underscore vs camelCase (e.g., 'generalPaymentInfo_isTravelAssist' vs 'generalPaymentInfoIsTravelAssist')\n"
-    "  * Any syntax variation in parameter names\n\n"
-    "IGNORE:\n"
-    "- Bracket types, escape characters, JSON formatting / ordering\n"
-    "- Prompt names and condition order when logically equivalent\n"
-    "- Empty or trivial 'else' conditions in ERP JSON (conditions with empty values, just dots '.', or whitespace)\n"
-    "- Additional 'else' conditions in ERP JSON that contain no meaningful content\n"
-    "- Parameter names that only differ by 'extension.' prefix (e.g., 'name' is equivalent to 'extension.name')\n\n"
-    "## SPECIAL HANDLING FOR ERP 'ELSE' CONDITIONS:\n"
-    "The ERP system automatically includes 'else' conditions even when they are empty or contain only trivial content like '.' or whitespace. "
-    "Do NOT flag these as differences unless they contain actual meaningful logic or values that would change system behavior.\n\n"
-    "## PARAMETER NAME EXCEPTION:\n"
-    "ONLY ignore parameter name differences when one parameter has 'extension.' prefix and the other doesn't:\n"
-    "- 'name' is equivalent to 'extension.name'\n"
-    "- 'userId' is equivalent to 'extension.userId'\n"
-    "- But 'facilityname' is DIFFERENT from 'Facilityname'\n"
-    "- And 'facility.name' is DIFFERENT from both 'facilityname' and 'Facilityname'\n\n"
-    "RULES:\n"
-    "1. If no functional issues exist, reply exactly: 'No significant functional differences found.'\n"
-    "2. Otherwise, list each issue as a bullet starting with * .\n"
-    "3. Be especially strict about parameter name differences in conditions\n"
-    "4. For non-parameter values, focus on semantic differences only\n\n"
-    "## COMPARISON TASK\n"
-    "Compare these two JSON configurations and identify differences that affect functionality:\n\n"
+    "Your task is to identify ACTUAL differences that would cause functional failures.\n\n"
+    "## CRITICAL INSTRUCTIONS\n\n"
+    "**DO NOT HALLUCINATE DIFFERENCES**: Only flag differences that ACTUALLY exist. "
+    "If two parameter names are identical (e.g., 'clientCity' vs 'clientCity'), do NOT report them as different.\n\n"
+    "## WHAT TO ANALYZE AND FLAG\n\n"
+    "1. **Missing or Additional Conditions**: Conditions that exist in one JSON but not the other\n"
+    "2. **Different Condition Logic**: Different comparison operators or logical structure\n"
+    "3. **Different Condition Values**: Different values being compared against\n"
+    "4. **ACTUAL Parameter Name Differences** (only when they are truly different):\n"
+    "   - Case differences: 'facilityname' vs 'Facilityname' (these ARE different)\n"
+    "   - Punctuation: 'facility.name' vs 'facilityname' (these ARE different)\n"
+    "   - Underscore vs camelCase: 'payment_info' vs 'paymentInfo' (these ARE different)\n"
+    "   - But 'clientCity' vs 'clientCity' are IDENTICAL (do NOT flag)\n\n"
+    "## WHAT TO IGNORE\n\n"
+    "- JSON formatting, bracket types, spacing, key ordering\n"
+    "- Condition ordering when logically equivalent\n"
+    "- Empty 'else' conditions in ERP (containing only '.', whitespace, or empty values)\n"
+    "- Prompt names or metadata fields\n\n"
+    "## VERIFICATION STEP\n\n"
+    "Before reporting any parameter name difference, double-check that the names are ACTUALLY different:\n"
+    "- If Notion has 'clientCity' and ERP has 'clientCity' → these are IDENTICAL, do NOT flag\n"
+    "- If Notion has 'clientCity' and ERP has 'ClientCity' → these are DIFFERENT, flag it\n"
+    "- If Notion has 'client_city' and ERP has 'clientCity' → these are DIFFERENT, flag it\n\n"
+    "## RESPONSE FORMAT\n\n"
+    "- If no actual differences exist: 'No significant functional differences found.'\n"
+    "- If differences exist: List each as '* [specific difference description]'\n"
+    "- Be precise and accurate in your descriptions\n\n"
+    "## COMPARISON TASK\n\n"
+    "Compare these two JSON configurations and identify ONLY actual differences:\n\n"
     "NOTION JSON (Reference):\n```json\n{{NOTION_JSON}}\n```\n\n"
     "ERP JSON (Target):\n```json\n{{ERP_JSON}}\n```\n"
 )
@@ -293,11 +288,19 @@ def _normalise_op(op: str) -> str:
     op = op.upper()
     return {"=": "==", "IS NULL": "IS NULL", "IS NOT NULL": "IS NOT NULL"}.get(op, op)
 
+def _clean_extension_prefix(field_name: str) -> str:
+    """Remove 'extension.' prefix from field names if it exists."""
+    if field_name and field_name.startswith("extension."):
+        return field_name[len("extension."):]
+    return field_name
+
 def _expr_to_string(node: Dict[str, Any]) -> str:
     if node.get("leaf", False) or not ("left" in node and "right" in node):
         field = node.get("fieldName", "")
         if field and field.startswith("$context."):
             field = field[len("$context."):]
+        # Clean extension prefix before applying field renames
+        field = _clean_extension_prefix(field)
         field = FIELD_RENAMES.get(field, field)
         op = _normalise_op(node.get("operation", ""))
         val = node.get("value")
