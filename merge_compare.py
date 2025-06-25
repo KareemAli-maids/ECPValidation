@@ -318,11 +318,10 @@ def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     for index, cond in enumerate(conditions):
         expr_tree = cond.get("expression") or json.loads(cond.get("tree", "{}"))
         condition_str = _expr_to_string(expr_tree)
-        # Add 'if' for the first condition, 'else if' for subsequent conditions
-        if index == 0:
-            condition_str = f"if {condition_str}"
-        else:
-            condition_str = f"else if {condition_str}"
+        # Remove '.extension' from condition string
+        condition_str = condition_str.replace(".extension", "")
+        # Add 'if' for all conditions as per user's manual edit
+        condition_str = f"if {condition_str}"
         logic.append({
             "condition": condition_str,
             "value": cond.get("value", "").strip(),
