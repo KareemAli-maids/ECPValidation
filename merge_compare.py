@@ -168,10 +168,17 @@ COMPARISON_PROMPT = (
 
 def compare_with_claude(notion_json: Dict[str, Any] | List[Any], erp_json: Dict[str, Any] | List[Any]) -> str:
     """Return Claude comparison output (stripped)."""
+    # Final check to ensure 'extension.' is removed from both ERP and Notion JSON before comparison
+    cleaned_erp_json = _deep_replace_extension(erp_json)
+    if cleaned_erp_json != erp_json:
+        logging.debug("Final cleanup of 'extension.' in ERP JSON before comparison")
+    cleaned_notion_json = _deep_replace_extension(notion_json)
+    if cleaned_notion_json != notion_json:
+        logging.debug("Final cleanup of 'extension.' in Notion JSON before comparison")
 
     prompt = (
-        COMPARISON_PROMPT.replace("{{NOTION_JSON}}", json.dumps(notion_json, ensure_ascii=False, indent=2))
-        .replace("{{ERP_JSON}}", json.dumps(erp_json, ensure_ascii=False, indent=2))
+        COMPARISON_PROMPT.replace("{{NOTION_JSON}}", json.dumps(cleaned_notion_json, ensure_ascii=False, indent=2))
+        .replace("{{ERP_JSON}}", json.dumps(cleaned_erp_json, ensure_ascii=False, indent=2))
     )
 
     payload = {
@@ -295,12 +302,30 @@ def _expr_to_string(node: Dict[str, Any]) -> str:
     logic = node.get("logicalOperator", "").upper()
     return f"( {left} {logic} {right} )"
 
+def _deep_replace_extension(obj: Any) -> Any:
+    """Recursively replace 'extension.' in all strings within a nested structure."""
+    if isinstance(obj, str):
+        new_str = obj.replace("extension.", "")
+        if obj != new_str:
+            logging.debug("Replaced 'extension.' in string: %s -> %s", obj, new_str)
+        return new_str
+    elif isinstance(obj, dict):
+        return {k: _deep_replace_extension(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_deep_replace_extension(item) for item in obj]
+    else:
+        return obj
+
 def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Transform a GPTPromptParameter record into the simplified schema."""
+    # First, recursively remove 'extension.' from all strings in the raw data
+    raw = _deep_replace_extension(raw)
+    
     identifier = raw.get("name", "")
     parameter = raw.get("name", "")
-    # Remove 'extension.' from parameter name if it exists
+    # Remove 'extension.' from parameter name if it exists (though already handled by deep replace)
     if "extension." in parameter:
+        logging.debug("Additional removal of 'extension.' from parameter: %s", parameter)
         parameter = parameter.replace("extension.", "")
 
     logic: List[Dict[str, str]] = []
@@ -318,8 +343,10 @@ def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     for index, cond in enumerate(conditions):
         expr_tree = cond.get("expression") or json.loads(cond.get("tree", "{}"))
         condition_str = _expr_to_string(expr_tree)
-        # Remove 'extension.' from condition string
-        condition_str = condition_str.replace("extension.", "")
+        # Remove 'extension.' from condition string (though already handled by deep replace)
+        if "extension." in condition_str:
+            logging.debug("Additional removal of 'extension.' from condition: %s", condition_str)
+            condition_str = condition_str.replace("extension.", "")
         # Add 'if' for all conditions as per user's manual edit
         condition_str = f"if {condition_str}"
         logic.append({
@@ -747,12 +774,20 @@ class NotionDatabaseToCSV:
                     parts = text.split(":", 1)
                     if len(parts) == 2:
                         parameter_name = parts[1].strip()
+                        # Remove 'extension.' from parameter name if it exists
+                        if "extension." in parameter_name:
+                            logging.debug("Removing 'extension.' from Notion parameter name: %s", parameter_name)
+                            parameter_name = parameter_name.replace("extension.", "")
 
                 elif btype == "toggle" and "condition" in text.lower():
                     condition_depth = blk.get("depth", 0)
                     condition_text = text.replace("[toggle]", "").strip()
                     if condition_text.lower().startswith("condition "):
                         condition_text = condition_text[10:].strip()
+                    # Remove 'extension.' from condition text if it exists
+                    if "extension." in condition_text:
+                        logging.debug("Removing 'extension.' from Notion condition text: %s", condition_text)
+                        condition_text = condition_text.replace("extension.", "")
                     
                     # Use original fast algorithm with simple numbering
                     j = i + 1
@@ -793,11 +828,16 @@ class NotionDatabaseToCSV:
 
             identifier = f"{page_name.replace(' ', '_')}"
 
-            return {
+            result = {
                 "identifier": identifier,
                 "parameter": parameter_name,
                 "conditionalLogic": conditional_logic
             }
+            # Final deep clean of 'extension.' from the entire Notion record
+            cleaned_result = _deep_replace_extension(result)
+            if cleaned_result != result:
+                logging.debug("Deep cleanup of 'extension.' from Notion record: %s", identifier)
+            return cleaned_result
 
         except Exception as e:
             log.error("Error processing page %s: %s", page.get("id", "unknown"), e)
