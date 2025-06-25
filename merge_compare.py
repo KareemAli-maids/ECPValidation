@@ -173,9 +173,17 @@ def compare_with_claude(notion_json: Dict[str, Any] | List[Any], erp_json: Dict[
     if cleaned_erp_json != erp_json:
         logging.debug("Final cleanup of '.extension' in ERP JSON before comparison")
 
+    # Convert to JSON string and perform a final string replacement to catch any remaining '.extension'
+    erp_json_str = json.dumps(cleaned_erp_json, ensure_ascii=False, indent=2)
+    if '.extension' in erp_json_str:
+        logging.debug("Performing final string replacement of '.extension' in ERP JSON string")
+        erp_json_str = erp_json_str.replace('.extension', '')
+
+    notion_json_str = json.dumps(notion_json, ensure_ascii=False, indent=2)
+
     prompt = (
-        COMPARISON_PROMPT.replace("{{NOTION_JSON}}", json.dumps(notion_json, ensure_ascii=False, indent=2))
-        .replace("{{ERP_JSON}}", json.dumps(cleaned_erp_json, ensure_ascii=False, indent=2))
+        COMPARISON_PROMPT.replace("{{NOTION_JSON}}", notion_json_str)
+        .replace("{{ERP_JSON}}", erp_json_str)
     )
 
     payload = {
@@ -1458,6 +1466,11 @@ def main() -> None:
         # Convert to pretty-printed JSON strings for Google Sheets (readable format)
         notion_json_str = json.dumps(processed_notion_json, ensure_ascii=False, indent=2)
         erp_json_str = json.dumps(erp_json, ensure_ascii=False, indent=2)
+        
+        # Final replacement of '.extension' in ERP JSON string to ensure it's removed
+        if '.extension' in erp_json_str:
+            logging.debug("Final removal of '.extension' from ERP JSON string for parameter %s", param)
+            erp_json_str = erp_json_str.replace('.extension', '')
         
         # Check for uppercase booleans and normalize them
         notion_has_uppercase = has_uppercase_booleans(notion_json_str)
