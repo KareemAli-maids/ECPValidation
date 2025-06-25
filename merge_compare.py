@@ -295,11 +295,25 @@ def _expr_to_string(node: Dict[str, Any]) -> str:
     logic = node.get("logicalOperator", "").upper()
     return f"( {left} {logic} {right} )"
 
+def _deep_replace_extension(obj: Any) -> Any:
+    """Recursively replace '.extension' in all strings within a nested structure."""
+    if isinstance(obj, str):
+        return obj.replace(".extension", "")
+    elif isinstance(obj, dict):
+        return {k: _deep_replace_extension(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_deep_replace_extension(item) for item in obj]
+    else:
+        return obj
+
 def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Transform a GPTPromptParameter record into the simplified schema."""
+    # First, recursively remove '.extension' from all strings in the raw data
+    raw = _deep_replace_extension(raw)
+    
     identifier = raw.get("name", "")
     parameter = raw.get("name", "")
-    # Remove '.extension' from parameter name if it exists
+    # Remove '.extension' from parameter name if it exists (though already handled by deep replace)
     if ".extension" in parameter:
         parameter = parameter.replace(".extension", "")
 
@@ -318,7 +332,7 @@ def convert_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     for index, cond in enumerate(conditions):
         expr_tree = cond.get("expression") or json.loads(cond.get("tree", "{}"))
         condition_str = _expr_to_string(expr_tree)
-        # Remove '.extension' from condition string
+        # Remove '.extension' from condition string (though already handled by deep replace)
         condition_str = condition_str.replace(".extension", "")
         # Add 'if' for all conditions as per user's manual edit
         condition_str = f"if {condition_str}"
